@@ -107,18 +107,19 @@ void na_unity_start(void) {
     player = jo_new_object("com/unity3d/player/UnityPlayerForActivityOrService");
     surface = jo_new_object("android/view/Surface");
 
-    void (*initJni)(JNIEnv *, jobject, jobject) = native_with_args("initJni", "(Landroid/content/Context;");
+    // Unity 6: initJni(Context, int); the int is 0 for a plain Activity
+    void (*initJni)(JNIEnv *, jobject, jobject, jint) = native_with_args("initJni", "(Landroid/content/Context;I");
     if (initJni) {
         l_info("[unity] initJni...");
-        initJni(env, player, activity);
+        initJni(env, player, activity, 0);
         l_info("[unity] initJni done");
     }
 
-    int (*recreate)(JNIEnv *, jobject, jint, jobject) = native_with_args("nativeRecreateGfxState", "(ILandroid/view/Surface;");
+    void (*recreate)(JNIEnv *, jobject, jint, jobject) = native_with_args("nativeRecreateGfxState", "(ILandroid/view/Surface;");
     if (recreate) {
         l_info("[unity] nativeRecreateGfxState...");
-        int r = recreate(env, player, 0, surface);
-        l_info("[unity] nativeRecreateGfxState: %d", r);
+        recreate(env, player, 0, surface);
+        l_info("[unity] nativeRecreateGfxState done");
     }
 
     void (*surface_changed)(JNIEnv *, jobject) = native_with_args("nativeSendSurfaceChangedEvent", "(");

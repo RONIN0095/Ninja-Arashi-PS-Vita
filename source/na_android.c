@@ -43,10 +43,13 @@ typedef struct {
 
 static __thread na_looper *thread_looper = NULL;
 
+// Android's main/UI thread always has a looper; ours get one on first use.
 void *ALooper_forThread_na(void) {
+    if (!thread_looper) ALooper_prepare_na(0);
     return thread_looper;
 }
 
+void *ALooper_prepare_na(int opts);
 void *ALooper_prepare_na(int opts) {
     if (!thread_looper) {
         na_looper *l = calloc(1, sizeof(*l));

@@ -503,6 +503,131 @@ static double wcstold_na(const wchar_t *s, wchar_t **e) { return wcstod(s, e); }
 
 static int unsetenv_na(const char *name) { return 0; }
 
+/*
+ * getauxval: CPU features (Cortex-A9: VFPv3 + NEON, no IDIV, no VFPv4)
+ */
+#define AT_HWCAP 16
+#define AT_HWCAP2 26
+#define AT_PAGESZ 6
+
+static unsigned long getauxval_na(unsigned long type) {
+    switch (type) {
+        case AT_HWCAP:
+            // HALF | THUMB | FAST_MULT | VFP | EDSP | NEON | VFPv3 | TLS
+            return 0x2 | 0x4 | 0x10 | 0x40 | 0x80 | 0x1000 | 0x2000 | 0x8000;
+        case AT_HWCAP2: return 0;
+        case AT_PAGESZ: return 4096;
+        default:
+            errno = ENOENT;
+            return 0;
+    }
+}
+
+/*
+ * syscall(): futex (Unity's baselib locks are built on it), gettid, CPU affinity
+ */
+#define NR_GETTID 224
+#define NR_FUTEX 240
+#define NR_SCHED_SETAFFINITY 241
+#define NR_SCHED_GETAFFINITY 242
+
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#define FUTEX_WAIT_BITSET 9
+#define FUTEX_WAKE_BITSET 10
+#define FUTEX_CLOCK_REALTIME 256
+
+#define FUTEX_BUCKETS 64
+
+static pthread_mutex_t futex_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t futex_cond[FUTEX_BUCKETS];
+static int futex_ready = 0;
+
+static pthread_cond_t *futex_bucket(volatile int *addr) {
+    return &futex_cond[(((uintptr_t)addr) >> 2) % FUTEX_BUCKETS];
+}
+
+// Waiters of a bucket are all woken (futex allows spurious wakeups).
+static long futex_na(volatile int *addr, int op, int val, const struct timespec *timeout) {
+    int cmd = op & 0x7f;
+    if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
+        pthread_mutex_lock(&futex_lock);
+        pthread_cond_broadcast(futex_bucket(addr));
+        pthread_mutex_unlock(&futex_lock);
+        return val;
+    }
+    if (cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET) {
+        l_warn("futex: op %d not supported", op);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    struct timespec abs, now;
+    if (timeout) {
+        clock_gettime_soloader(0 /* CLOCK_REALTIME */, &now);
+        if (cmd == FUTEX_WAIT) {
+            // relative timeout
+            abs.tv_sec = now.tv_sec + timeout->tv_sec;
+            abs.tv_nsec = now.tv_nsec + timeout->tv_nsec;
+        } else if (op & FUTEX_CLOCK_REALTIME) {
+            abs = *timeout;
+        } else {
+            // absolute CLOCK_MONOTONIC deadline
+            struct timespec mono;
+            clock_gettime_soloader(1 /* CLOCK_MONOTONIC */, &mono);
+            int64_t d = (int64_t)(timeout->tv_sec - mono.tv_sec) * 1000000000LL + (timeout->tv_nsec - mono.tv_nsec);
+            if (d < 0) d = 0;
+            abs.tv_sec = now.tv_sec + d / 1000000000LL;
+            abs.tv_nsec = now.tv_nsec + d % 1000000000LL;
+        }
+        if (abs.tv_nsec >= 1000000000L) {
+            abs.tv_sec++;
+            abs.tv_nsec -= 1000000000L;
+        }
+    }
+
+    pthread_mutex_lock(&futex_lock);
+    if (*addr != val) {
+        pthread_mutex_unlock(&futex_lock);
+        errno = EAGAIN;
+        return -1;
+    }
+    int r = timeout ? pthread_cond_timedwait(futex_bucket(addr), &futex_lock, &abs)
+                    : pthread_cond_wait(futex_bucket(addr), &futex_lock);
+    pthread_mutex_unlock(&futex_lock);
+    if (r == ETIMEDOUT) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    return 0;
+}
+
+static long syscall_na(long n, long a1, long a2, long a3, long a4, long a5) {
+    switch (n) {
+        case NR_FUTEX:
+            return futex_na((volatile int *)a1, (int)a2, (int)a3, (const struct timespec *)a4);
+        case NR_GETTID:
+            return sceKernelGetThreadId();
+        case NR_SCHED_SETAFFINITY:
+            return 0;
+        case NR_SCHED_GETAFFINITY:
+            // three cores
+            if (a2 >= 4 && a3) {
+                memset((void *)a3, 0, a2);
+                *(uint32_t *)a3 = 0x7;
+                return 4;
+            }
+            errno = EINVAL;
+            return -1;
+        default: {
+            static int warned = 0;
+            if (warned++ < 32) l_warn("syscall(%ld): not implemented", n);
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+}
+
 // fnmatch with '*', '?' and '[...]'; flags are ignored (newlib on the Vita has none)
 static int fnmatch_na(const char *p, const char *s, int flags) {
     for (; *p; p++, s++) {
@@ -578,6 +703,8 @@ so_default_dynlib na_dynlib[] = {
     { "__end__", 0 },
     { "_ZTH15gDeferredAction", 0 },
     { "android_set_abort_message", (uintptr_t)&android_set_abort_message_na },
+    { "getauxval", (uintptr_t)&getauxval_na },
+    { "syscall", (uintptr_t)&syscall_na },
     { "sysconf", (uintptr_t)&sysconf_na },
 
     // files
@@ -692,6 +819,9 @@ so_default_dynlib na_dynlib[] = {
 const int na_dynlib_count = sizeof(na_dynlib) / sizeof(na_dynlib[0]);
 
 void na_dynlib_init(void) {
+    for (int i = 0; i < FUTEX_BUCKETS; i++)
+        pthread_cond_init(&futex_cond[i], NULL);
+    futex_ready = 1;
     sceKernelCreateLwMutex(&rwlock_init_lock, "rwlock_init", 0, 0, NULL);
     rwlock_init_lock_ready = 1;
 }
