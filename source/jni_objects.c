@@ -642,10 +642,123 @@ static jlong DJ_GetDirectBufferCapacity(JNIEnv *env, jobject buf) {
     return jo_get_long(buf, "__capacity");
 }
 
+/*
+ * Strings and arrays stay FalsoJNI's, but the native code sometimes hands
+ * them one of our objects or classes (a default answer where it expected a
+ * String, a Class it treats as an object). FalsoJNI would read that as a
+ * JavaString and copy a garbage length into the heap. These wrappers check
+ * the pointer first; they also fix GetStringUTFLength (UTF-8 length, not
+ * UTF-16) and GetStringUTFRegion (copied from the wrong address).
+ */
+#include <falso_jni/FalsoJNI_ImplBridge.h>
+
+#define JDA_MAGIC_ 0x4A444121
+
+static struct JNINativeInterface orig;
+
+static int is_class(const void *p) {
+    int r = 0;
+    sceKernelLockLwMutex(&jo_lock, 1, NULL);
+    for (DJClass *c = classes; c; c = c->next)
+        if ((const void *)c == p) { r = 1; break; }
+    sceKernelUnlockLwMutex(&jo_lock, 1);
+    return r;
+}
+
+static int not_falso(const void *p, const char *what) {
+    if (!p) return 1;
+    if (jo_is_object((jobject)p) || is_class(p)) {
+        static int warned = 0;
+        if (warned++ < 16)
+            l_warn("[JO] %s on %s %p (%s)", what, jo_is_object((jobject)p) ? "object" : "class", p,
+                   jo_is_object((jobject)p) ? jo_class_name((jobject)p) : ((DJClass *)p)->name);
+        return 1;
+    }
+    return 0;
+}
+
+static const char *DJ_GetStringUTFChars(JNIEnv *env, jstring s, jboolean *isCopy) {
+    if (isCopy) *isCopy = JNI_TRUE;
+    if (not_falso(s, "GetStringUTFChars")) return strdup("");
+    return orig.GetStringUTFChars(env, s, isCopy);
+}
+
+static jsize DJ_GetStringUTFLength(JNIEnv *env, jstring s) {
+    if (not_falso(s, "GetStringUTFLength")) return 0;
+    const char *c = orig.GetStringUTFChars(env, s, NULL);
+    jsize n = c ? (jsize)strlen(c) : 0;
+    free((void *)c);
+    return n;
+}
+
+static jsize DJ_GetStringLength(JNIEnv *env, jstring s) {
+    if (not_falso(s, "GetStringLength")) return 0;
+    return orig.GetStringLength(env, s);
+}
+
+static const jchar *DJ_GetStringChars(JNIEnv *env, jstring s, jboolean *isCopy) {
+    if (not_falso(s, "GetStringChars")) return calloc(1, sizeof(jchar));
+    return orig.GetStringChars(env, s, isCopy);
+}
+
+// start/len count UTF-16 units; the strings here are ASCII, so bytes == units
+static void DJ_GetStringUTFRegion(JNIEnv *env, jstring s, jsize start, jsize len, char *buf) {
+    if (!buf) return;
+    buf[0] = 0;
+    if (not_falso(s, "GetStringUTFRegion")) return;
+    const char *c = orig.GetStringUTFChars(env, s, NULL);
+    if (!c) return;
+    jsize n = (jsize)strlen(c);
+    if (start < 0) start = 0;
+    if (start > n) start = n;
+    if (len > n - start) len = n - start;
+    if (len < 0) len = 0;
+    memcpy(buf, c + start, len);
+    buf[len] = 0;
+    free((void *)c);
+}
+
+static void DJ_GetStringRegion(JNIEnv *env, jstring s, jsize start, jsize len, jchar *buf) {
+    if (not_falso(s, "GetStringRegion")) return;
+    orig.GetStringRegion(env, s, start, len, buf);
+}
+
+static jsize DJ_GetArrayLength(JNIEnv *env, jarray a) {
+    if (not_falso(a, "GetArrayLength")) return 0;
+    return orig.GetArrayLength(env, a);
+}
+
+static jobject DJ_GetObjectArrayElement(JNIEnv *env, jobjectArray a, jsize i) {
+    if (not_falso(a, "GetObjectArrayElement")) return NULL;
+    return orig.GetObjectArrayElement(env, a, i);
+}
+
+static jbyte *DJ_GetByteArrayElements(JNIEnv *env, jbyteArray a, jboolean *isCopy) {
+    if (not_falso(a, "GetByteArrayElements")) return NULL;
+    return orig.GetByteArrayElements(env, a, isCopy);
+}
+
+static void DJ_GetByteArrayRegion(JNIEnv *env, jbyteArray a, jsize start, jsize len, jbyte *buf) {
+    if (not_falso(a, "GetByteArrayRegion")) return;
+    orig.GetByteArrayRegion(env, a, start, len, buf);
+}
+
 void jni_objects_install(void) {
     sceKernelCreateLwMutex(&jo_lock, "jni_objects", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
 
     struct JNINativeInterface *t = (struct JNINativeInterface *)jni;
+    orig = *t;
+
+    t->GetStringUTFChars = DJ_GetStringUTFChars;
+    t->GetStringUTFLength = DJ_GetStringUTFLength;
+    t->GetStringLength = DJ_GetStringLength;
+    t->GetStringChars = DJ_GetStringChars;
+    t->GetStringUTFRegion = DJ_GetStringUTFRegion;
+    t->GetStringRegion = DJ_GetStringRegion;
+    t->GetArrayLength = DJ_GetArrayLength;
+    t->GetObjectArrayElement = DJ_GetObjectArrayElement;
+    t->GetByteArrayElements = DJ_GetByteArrayElements;
+    t->GetByteArrayRegion = DJ_GetByteArrayRegion;
 
     t->FindClass = DJ_FindClass;
     t->GetObjectClass = DJ_GetObjectClass;
