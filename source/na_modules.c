@@ -30,6 +30,7 @@
 
 #include <psp2/io/fcntl.h>
 #include <psp2/kernel/clib.h>
+#include <psp2/kernel/sysmem.h>
 
 #include "utils/dialog.h"
 #include "utils/logger.h"
@@ -60,6 +61,13 @@ static const char *dl_error = NULL;
  * so_util frees the file image after loading, so ELF program headers have
  * to be read separately for dl_iterate_phdr().
  */
+static unsigned free_user_mb(void) {
+    SceKernelFreeMemorySizeInfo info;
+    info.size = sizeof(info);
+    if (sceKernelGetFreeMemorySize(&info) < 0) return 0;
+    return (unsigned)(info.size_user / (1024 * 1024));
+}
+
 static int read_phdrs(NaLib *lib) {
     SceUID fd = sceIoOpen(lib->path, SCE_O_RDONLY, 0);
     if (fd < 0) return -1;
@@ -87,11 +95,11 @@ void na_modules_load(void) {
                             lib->path, lib->soname);
             continue;
         }
-        l_info("Loading %s at 0x%08x", lib->soname, lib->load_addr);
+        l_info("Loading %s at 0x%08x (%u MB free)", lib->soname, lib->load_addr, free_user_mb());
         int r = so_file_load(&lib->mod, lib->path, lib->load_addr);
         if (r < 0)
-            fatal_error("Could not load %s (0x%08x).\nIs kubridge installed and is there enough free memory?",
-                        lib->path, r);
+            fatal_error("Could not load %s (0x%08x).\nFree memory: %u MB.\nIs kubridge installed?",
+                        lib->path, r, free_user_mb());
         if (read_phdrs(lib) < 0)
             fatal_error("Could not read the program headers of %s.", lib->path);
         lib->loaded = 1;
@@ -108,6 +116,7 @@ void na_modules_load(void) {
         so_flush_caches(&lib->mod);
         l_info("%s relocated and linked.", lib->soname);
     }
+    l_info("Libraries loaded, %u MB free outside the heap.", free_user_mb());
 }
 
 void na_module_init(NaLibId id) {
