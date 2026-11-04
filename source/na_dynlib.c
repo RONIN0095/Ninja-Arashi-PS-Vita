@@ -481,7 +481,10 @@ static void update_abort_handler(void) {
     int want = (uintptr_t)sig_actions[BIONIC_SIGSEGV].handler > 1 ||
                (uintptr_t)sig_actions[BIONIC_SIGBUS].handler > 1;
     if (want && !abort_handler_on) {
-        int r = kuKernelRegisterAbortHandler(abort_handler, &old_abort_handler);
+        KuKernelAbortHandlerOpt opt;
+        memset(&opt, 0, sizeof(opt));
+        opt.size = sizeof(opt);
+        int r = kuKernelRegisterAbortHandler(abort_handler, &old_abort_handler, &opt);
         if (r < 0) {
             static int warned = 0;
             if (!warned++) l_error("kuKernelRegisterAbortHandler: 0x%x (kubridge too old? Need v0.3+)", r);
