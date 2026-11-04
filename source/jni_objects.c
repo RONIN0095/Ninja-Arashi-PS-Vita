@@ -361,11 +361,19 @@ static jobject DJ_AllocObject(JNIEnv *env, jclass clazz) {
     return new_object_of((DJClass *)clazz);
 }
 
+// Constructors run through jo_java_call(cls, "<init>", sig, obj, args)
+static jobject construct(jclass clazz, DJMethod *m, const jvalue *a, int argc) {
+    jobject o = new_object_of((DJClass *)clazz);
+    if (m && strcmp(m->sig, "()V") != 0)
+        jo_java_call(((DJClass *)clazz)->name, "<init>", m->sig, o, a, argc);
+    return o;
+}
+
 static jobject DJ_NewObjectV(JNIEnv *env, jclass clazz, jmethodID mid, va_list ap) {
     DJMethod *m = (DJMethod *)mid;
-    if (m && strcmp(m->sig, "()V") != 0)
-        l_warn("[JO] NewObject %s with ctor %s: arguments ignored", ((DJClass *)clazz)->name, m->sig);
-    return new_object_of((DJClass *)clazz);
+    jvalue a[DJ_MAX_ARGS];
+    int n = m ? args_from_va(m->sig, ap, a) : 0;
+    return construct(clazz, m, a, n);
 }
 
 static jobject DJ_NewObject(JNIEnv *env, jclass clazz, jmethodID mid, ...) {
@@ -377,7 +385,10 @@ static jobject DJ_NewObject(JNIEnv *env, jclass clazz, jmethodID mid, ...) {
 }
 
 static jobject DJ_NewObjectA(JNIEnv *env, jclass clazz, jmethodID mid, const jvalue *args) {
-    return new_object_of((DJClass *)clazz);
+    DJMethod *m = (DJMethod *)mid;
+    jvalue a[DJ_MAX_ARGS];
+    int n = m ? args_from_a(m->sig, args, a) : 0;
+    return construct(clazz, m, a, n);
 }
 
 static jmethodID DJ_GetMethodID(JNIEnv *env, jclass clazz, const char *name, const char *sig) {

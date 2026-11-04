@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <psp2/kernel/processmgr.h>
 
@@ -258,6 +259,9 @@ static jvalue default_return(const char *sig) {
     ret++;
     if (is(ret, "Ljava/lang/String;")) {
         r.l = jstr("");
+    } else if (is(ret, "Ljava/lang/Class;")) {
+        // a jclass, not an object
+        r.l = (*env())->FindClass(env(), "java/lang/Object");
     } else if (ret[0] == 'L') {
         char cname[128];
         size_t n = strlen(ret);
@@ -283,6 +287,23 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
     // SharedPreferences and its Editor
     if (strstr(cls, "SharedPreferences") || strstr(sc, "SharedPreferences"))
         return prefs_call(name, args, argc);
+
+    // Constructors
+    if (is(name, "<init>")) {
+        if (strstr(cls, "java/io/File") && argc >= 1) {
+            // File(String) or File(File parent, String child)
+            char *a0 = NULL, *a1 = NULL;
+            if (strncmp(sig, "(Ljava/lang/String;", 19) == 0) a0 = jo_jstring_to_utf8((jstring)args[0].l);
+            else if (strncmp(sig, "(Ljava/io/File;", 15) == 0 && args[0].l) a0 = jo_get_string(args[0].l, "path");
+            if (argc >= 2) a1 = jo_jstring_to_utf8((jstring)args[1].l);
+            char path[512];
+            snprintf(path, sizeof(path), "%s%s%s", a0 ? a0 : "", a1 ? "/" : "", a1 ? a1 : "");
+            jo_set_string(self, "path", path);
+            free(a0);
+            free(a1);
+        }
+        return r;
+    }
 
     // Context / Activity
     if (is(name, "getPackageName")) {
@@ -323,9 +344,33 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         char *p = jo_get_string(self, "path");
         r.l = jstr(p ? p : "");
         free(p);
-    } else if (is(sc, "java/io/File") && (is(name, "exists") || is(name, "isDirectory") || is(name, "mkdirs") ||
+    } else if (is(sc, "java/io/File") && is(name, "length")) {
+        char *p = jo_get_string(self, "path");
+        struct stat st;
+        r.j = (p && stat(p, &st) == 0) ? (jlong)st.st_size : 0;
+        free(p);
+    } else if (is(sc, "java/io/File") && is(name, "exists")) {
+        char *p = jo_get_string(self, "path");
+        struct stat st;
+        r.z = (p && stat(p, &st) == 0) ? JNI_TRUE : JNI_FALSE;
+        free(p);
+    } else if (is(sc, "java/io/File") && (is(name, "isDirectory") || is(name, "mkdirs") || is(name, "mkdir") ||
                                           is(name, "canWrite") || is(name, "canRead"))) {
         r.z = JNI_TRUE;
+
+    // PackageManager
+    } else if (is(name, "getPackageManager")) {
+        r.l = jo_new_object("android/content/pm/PackageManager");
+    } else if (is(name, "getPackageInfo")) {
+        jobject pi = jo_new_object("android/content/pm/PackageInfo");
+        jo_set_string(pi, "packageName", PACKAGE_NAME);
+        jo_set_string(pi, "versionName", "1.9.3");
+        jo_set_int(pi, "versionCode", 193);
+        jo_set_long(pi, "firstInstallTime", 1700000000000LL);
+        jo_set_long(pi, "lastUpdateTime", 1700000000000LL);
+        r.l = pi;
+    } else if (is(name, "getInstallerPackageName")) {
+        r.l = jstr("com.android.vending");
 
     // Locale
     } else if (is(name, "getLanguage")) {
@@ -386,7 +431,7 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         r.l = jo_new_object("java/lang/Thread");
     } else if (is(name, "getClassLoader")) {
         r.l = jo_new_object("java/lang/ClassLoader");
-    } else if (is(name, "loadClass") && argc >= 1) {
+    } else if ((is(name, "loadClass") || is(name, "forName")) && argc >= 1) {
         char *n = jo_jstring_to_utf8((jstring)args[0].l);
         if (n) {
             for (char *c = n; *c; c++)

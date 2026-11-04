@@ -23,8 +23,9 @@ void *sceClibMemclr(void *dst, size_t len) {
  *
  * Unity reserves memory with mmap and then munmaps the unaligned head and
  * tail of the block to get an aligned region, so munmap gets addresses inside
- * a mapping. Mappings are tracked and freed once all of their bytes have
- * been unmapped. File mappings are read into memory.
+ * a mapping. Mappings are tracked page by page (a page unmapped twice counts
+ * once, MAP_FIXED maps it back) and freed once every page is unmapped. File
+ * mappings are read into memory.
  */
 
 #include <errno.h>
@@ -39,8 +40,25 @@ void *sceClibMemclr(void *dst, size_t len) {
 typedef struct {
     uintptr_t base;
     size_t len;
-    size_t unmapped; // bytes released by partial munmaps
+    uint8_t *gone;   // one bit per page: unmapped
+    size_t n_gone;   // pages unmapped
 } mapping;
+
+static void mark_pages(mapping *m, uintptr_t start, uintptr_t end, int unmapped) {
+    if (start < m->base) start = m->base;
+    if (end > m->base + m->len) end = m->base + m->len;
+    for (uintptr_t a = start & ~(uintptr_t)(MAP_PAGE - 1); a < end; a += MAP_PAGE) {
+        size_t p = (a - m->base) / MAP_PAGE;
+        int was = (m->gone[p / 8] >> (p % 8)) & 1;
+        if (unmapped && !was) {
+            m->gone[p / 8] |= 1 << (p % 8);
+            m->n_gone++;
+        } else if (!unmapped && was) {
+            m->gone[p / 8] &= ~(1 << (p % 8));
+            m->n_gone--;
+        }
+    }
+}
 
 static mapping mappings[MAX_MAPPINGS];
 static SceKernelLwMutexWork map_lock;
@@ -79,6 +97,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         mapping *m = find_mapping((uintptr_t)addr);
         if (m && (uintptr_t)addr + len <= m->base + m->len) {
             ret = addr;
+            mark_pages(m, (uintptr_t)addr, (uintptr_t)addr + len, 0);
             if (fd < 0) memset(ret, 0, len);
         } else {
             unlock();
@@ -90,8 +109,13 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         int slot = -1;
         for (int i = 0; i < MAX_MAPPINGS; i++)
             if (!mappings[i].base) { slot = i; break; }
-        if (slot >= 0) ret = memalign(MAP_PAGE, len);
+        uint8_t *gone = NULL;
+        if (slot >= 0) {
+            gone = calloc(1, (len / MAP_PAGE + 7) / 8);
+            ret = gone ? memalign(MAP_PAGE, len) : NULL;
+        }
         if (!ret) {
+            free(gone);
             unlock();
             l_error("mmap(%u bytes): out of memory%s", (unsigned)length, slot < 0 ? " (mapping table full)" : "");
             errno = ENOMEM;
@@ -100,7 +124,8 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         memset(ret, 0, len);
         mappings[slot].base = (uintptr_t)ret;
         mappings[slot].len = len;
-        mappings[slot].unmapped = 0;
+        mappings[slot].gone = gone;
+        mappings[slot].n_gone = 0;
     }
     unlock();
 
@@ -121,14 +146,13 @@ int munmap(void *addr, size_t length) {
     lock();
     mapping *m = find_mapping((uintptr_t)addr);
     if (m) {
-        uintptr_t end = (uintptr_t)addr + length;
-        if (end > m->base + m->len) end = m->base + m->len;
-        m->unmapped += end - (uintptr_t)addr;
-        // the memory is freed once every byte of the mapping was unmapped
-        if (m->unmapped >= m->len) {
+        // pages are counted once even if unmapped repeatedly; the memory is
+        // freed when every page of the mapping is unmapped
+        mark_pages(m, (uintptr_t)addr, (uintptr_t)addr + length, 1);
+        if (m->n_gone * MAP_PAGE >= m->len) {
             free((void *)m->base);
-            m->base = 0;
-            m->len = 0;
+            free(m->gone);
+            memset(m, 0, sizeof(*m));
         }
     }
     unlock();
