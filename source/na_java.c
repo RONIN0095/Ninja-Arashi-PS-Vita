@@ -685,6 +685,26 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         r.l = jstr(sc[0] ? sc : cls);
     } else if (is(name, "currentThread")) {
         r.l = jo_new_object("java/lang/Thread");
+    } else if (is(name, "findLibrary") && argc >= 1) {
+        // System.loadLibrary name -> path of the .so (na_modules.c knows the game's libraries)
+        char *n = jo_jstring_to_utf8((jstring)args[0].l);
+        char path[256];
+        snprintf(path, sizeof(path), DATA_PATH "lib/lib%s.so", n ? n : "");
+        l_info("[JAVA] findLibrary(%s) -> %s", n ? n : "?", path);
+        free(n);
+        r.l = jstr(path);
+    } else if (strstr(cls, "AlertDialog") || strstr(sc, "AlertDialog")) {
+        // Unity reports fatal errors in a dialog: put the text in the log
+        for (int i = 0; i < argc; i++) {
+            if (args[i].l && !jo_is_object(args[i].l) && strstr(sig, "CharSequence")) {
+                char *t = jo_jstring_to_utf8((jstring)args[i].l);
+                if (t && t[0]) l_error("[JAVA] AlertDialog.%s: %s", name, t);
+                free(t);
+            }
+        }
+        r = default_return(sig);
+    } else if (is(name, "kill")) {
+        l_error("[JAVA] %s.kill(): Unity is shutting down (see the dialog text above)", cls);
     } else if (is(name, "getClassLoader")) {
         r.l = jo_new_object("java/lang/ClassLoader");
     } else if ((is(name, "loadClass") || is(name, "forName")) && argc >= 1) {

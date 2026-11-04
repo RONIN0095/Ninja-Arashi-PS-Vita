@@ -37,7 +37,13 @@ static int io_logged = 0;
 
 
 FILE * fopen_soloader(const char * filename, const char * mode) {
-    if (strcmp(filename, "/proc/cpuinfo") == 0) {
+    // Three cores for applications at 444 MHz
+    if (strcmp(filename, "/sys/devices/system/cpu/present") == 0 ||
+        strcmp(filename, "/sys/devices/system/cpu/possible") == 0) {
+        return fopen_soloader("app0:/cpu_present", mode);
+    } else if (strstr(filename, "/sys/devices/system/cpu/cpu") == filename && strstr(filename, "cpuinfo_max_freq")) {
+        return fopen_soloader("app0:/cpu_max_freq", mode);
+    } else if (strcmp(filename, "/proc/cpuinfo") == 0) {
         return fopen_soloader("app0:/cpuinfo", mode);
     } else if (strcmp(filename, "/proc/meminfo") == 0) {
         return fopen_soloader("app0:/meminfo", mode);
@@ -58,7 +64,12 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
 }
 
 int open_soloader(const char * path, int oflag, ...) {
-    if (strcmp(path, "/proc/cpuinfo") == 0) {
+    if (strcmp(path, "/sys/devices/system/cpu/present") == 0 ||
+        strcmp(path, "/sys/devices/system/cpu/possible") == 0) {
+        return open_soloader("app0:/cpu_present", oflag);
+    } else if (strstr(path, "/sys/devices/system/cpu/cpu") == path && strstr(path, "cpuinfo_max_freq")) {
+        return open_soloader("app0:/cpu_max_freq", oflag);
+    } else if (strcmp(path, "/proc/cpuinfo") == 0) {
         return open_soloader("app0:/cpuinfo", oflag);
     } else if (strcmp(path, "/proc/meminfo") == 0) {
         return open_soloader("app0:/meminfo", oflag);

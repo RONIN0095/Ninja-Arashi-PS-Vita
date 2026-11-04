@@ -287,6 +287,8 @@ vita_create_vpk(${VITA_VPKNAME}.vpk ${VITA_TITLEID} eboot.bin
                 VERSION ${VITA_VERSION}
                 NAME ${VITA_APP_NAME}
                 FILE ${CMAKE_SOURCE_DIR}/extras/cpuinfo cpuinfo
+                ${CMAKE_SOURCE_DIR}/extras/cpu_present cpu_present
+                ${CMAKE_SOURCE_DIR}/extras/cpu_max_freq cpu_max_freq
                 ${CMAKE_SOURCE_DIR}/extras/meminfo meminfo
                 ${CMAKE_SOURCE_DIR}/extras/urandom urandom
                 ${LIVEAREA_DIR}/icon0.png sce_sys/icon0.png
