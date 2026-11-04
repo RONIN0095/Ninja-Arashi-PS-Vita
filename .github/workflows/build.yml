@@ -62,3 +62,26 @@ jobs:
         with:
           name: ninjaarashi-vpk
           path: build/ninjaarashi.vpk
+
+  publish:
+    name: Publish the VPK to the 'builds' branch
+    if: github.event_name != 'pull_request'
+    needs: [vpk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ninjaarashi-vpk
+          path: out
+      - name: Push to the builds branch
+        run: |
+          cd out
+          printf 'commit %s\nbranch %s\nbuilt %s\n' "$GITHUB_SHA" "$GITHUB_REF_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > BUILD_INFO.txt
+          git init -q -b builds
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -qm "Build of $GITHUB_SHA"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" builds
