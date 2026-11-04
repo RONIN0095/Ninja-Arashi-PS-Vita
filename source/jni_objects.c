@@ -743,6 +743,11 @@ static void DJ_GetByteArrayRegion(JNIEnv *env, jbyteArray a, jsize start, jsize 
     orig.GetByteArrayRegion(env, a, start, len, buf);
 }
 
+// FalsoJNI's DeleteGlobalRef free()s the object. Unity drops global refs to
+// classes and objects that stay in use (our class list, interned strings),
+// so references are never freed here; the leak is small.
+static void DJ_DeleteGlobalRef(JNIEnv *env, jobject obj) {}
+
 void jni_objects_install(void) {
     sceKernelCreateLwMutex(&jo_lock, "jni_objects", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
 
@@ -759,6 +764,8 @@ void jni_objects_install(void) {
     t->GetObjectArrayElement = DJ_GetObjectArrayElement;
     t->GetByteArrayElements = DJ_GetByteArrayElements;
     t->GetByteArrayRegion = DJ_GetByteArrayRegion;
+    t->DeleteGlobalRef = DJ_DeleteGlobalRef;
+    t->DeleteWeakGlobalRef = DJ_DeleteGlobalRef;
 
     t->FindClass = DJ_FindClass;
     t->GetObjectClass = DJ_GetObjectClass;
