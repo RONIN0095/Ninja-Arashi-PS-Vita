@@ -61,7 +61,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ninjaarashi-vpk
-          path: build/ninjaarashi.vpk
+          path: |
+            build/ninjaarashi.vpk
+            build/so_loader
 
   publish:
     name: Publish the VPK to the 'builds' branch
