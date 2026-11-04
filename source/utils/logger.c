@@ -75,7 +75,11 @@ const char *log_recent_line(int i) {
     return recent_lines[(first + i) % LOG_RECENT_LINES];
 }
 
+// Time of the last log line (for the watchdog in main.c)
+volatile uint64_t log_last_activity_us = 0;
+
 void _log_print(int t, const char* fmt, ...) {
+    log_last_activity_us = sceKernelGetProcessTimeWide();
     if (!atomic_load_explicit(&_log_mutex_ready, memory_order_relaxed)) {
         int ret = sceKernelCreateLwMutex(&_log_mutex, "log_lock", 0, 0, NULL);
         if (ret < 0) {

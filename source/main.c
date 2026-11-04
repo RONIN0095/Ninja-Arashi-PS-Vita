@@ -21,6 +21,7 @@
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/touch.h>
 
 #include <vitaGL.h>
@@ -50,6 +51,28 @@ int sceLibcHeapSize = 4 * 1024 * 1024;
 // The main thread runs Unity's player loop: give it a big stack
 unsigned int sceUserMainThreadStackSize = 4 * 1024 * 1024;
 
+/*
+ * Watchdog: when nothing is logged and no frame finishes for 30 s, write a
+ * line and crash on purpose. The Vita then writes a core dump with every
+ * thread's registers, which shows where the game hangs.
+ */
+extern volatile uint64_t log_last_activity_us;
+static volatile uint64_t last_frame_us = 0;
+
+static int watchdog_thread(SceSize args, void *argp) {
+    while (1) {
+        sceKernelDelayThread(1000 * 1000);
+        uint64_t now = sceKernelGetProcessTimeWide();
+        uint64_t last = log_last_activity_us > last_frame_us ? log_last_activity_us : last_frame_us;
+        if (last && now - last > 30ULL * 1000 * 1000) {
+            l_fatal("Watchdog: no progress for 30 s, crashing on purpose for a core dump.");
+            sceKernelDelayThread(200 * 1000);
+            *(volatile int *)0 = 0;
+        }
+    }
+    return 0;
+}
+
 int main() {
     sceIoMkdir("ux0:data", 0777);
     sceIoMkdir(DATA_PATH, 0777);
@@ -75,6 +98,9 @@ int main() {
     glClear(GL_COLOR_BUFFER_BIT);
     vglSwapBuffers(GL_FALSE);
 
+    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100 + 10, 0x4000, 0, 0, NULL);
+    if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
+
     na_unity_start();
 
     int frame = 0;
@@ -87,6 +113,7 @@ int main() {
         if (na_egl_swap_count == swaps_before)
             sceKernelDelayThread(1000);
         frame++;
+        last_frame_us = sceKernelGetProcessTimeWide();
     }
 
     sceKernelExitDeleteThread(0);

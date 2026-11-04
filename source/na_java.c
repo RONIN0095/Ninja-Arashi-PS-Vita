@@ -20,9 +20,11 @@
 
 #include "jni_objects.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #include <psp2/kernel/processmgr.h>
@@ -274,6 +276,61 @@ static jvalue default_return(const char *sig) {
     return r;
 }
 
+/*
+ * java.lang.String methods on FalsoJNI strings
+ */
+static int string_call(const char *name, const char *sig, jobject self, const jvalue *args, int argc, jvalue *r) {
+    char *str = jo_jstring_to_utf8((jstring)self);
+    if (!str) return 0;
+    int len = (int)strlen(str);
+    int handled = 1;
+    char *a0 = (argc >= 1 && strstr(sig, "(Ljava/lang/String;")) ? jo_jstring_to_utf8((jstring)args[0].l) : NULL;
+
+    if (is(name, "length")) r->i = len;
+    else if (is(name, "isEmpty")) r->z = len == 0;
+    else if (is(name, "toString") || is(name, "intern") || is(name, "trim")) r->l = self;
+    else if (is(name, "hashCode")) {
+        int h = 0;
+        for (int i = 0; i < len; i++) h = 31 * h + (unsigned char)str[i];
+        r->i = h;
+    } else if (is(name, "equals")) r->z = a0 && strcmp(str, a0) == 0;
+    else if (is(name, "equalsIgnoreCase")) r->z = a0 && strcasecmp(str, a0) == 0;
+    else if (is(name, "startsWith")) r->z = a0 && strncmp(str, a0, strlen(a0)) == 0;
+    else if (is(name, "endsWith")) r->z = a0 && ends_with(str, a0);
+    else if (is(name, "contains")) r->z = a0 && strstr(str, a0) != NULL;
+    else if (is(name, "indexOf") && a0) {
+        char *f = strstr(str, a0);
+        r->i = f ? (int)(f - str) : -1;
+    } else if (is(name, "charAt")) r->c = (argc >= 1 && args[0].i >= 0 && args[0].i < len) ? (unsigned char)str[args[0].i] : 0;
+    else if (is(name, "substring")) {
+        int b = argc >= 1 ? args[0].i : 0, e = argc >= 2 ? args[1].i : len;
+        if (b < 0) b = 0;
+        if (e > len) e = len;
+        if (e < b) e = b;
+        str[e] = 0;
+        r->l = jstr(str + b);
+    } else if (is(name, "toLowerCase") || is(name, "toUpperCase")) {
+        for (char *c = str; *c; c++)
+            *c = name[2] == 'L' ? (char)tolower((unsigned char)*c) : (char)toupper((unsigned char)*c);
+        r->l = jstr(str);
+    } else if (is(name, "concat")) {
+        char *t = malloc(len + (a0 ? strlen(a0) : 0) + 1);
+        strcpy(t, str);
+        if (a0) strcat(t, a0);
+        r->l = jstr(t);
+        free(t);
+    } else if (is(name, "getBytes")) {
+        jbyteArray b = (*env())->NewByteArray(env(), len);
+        if (b) (*env())->SetByteArrayRegion(env(), b, 0, len, (const jbyte *)str);
+        r->l = b;
+    } else {
+        handled = 0;
+    }
+    free(a0);
+    free(str);
+    return handled;
+}
+
 static const char *self_class(jobject self) {
     return self && jo_is_object(self) ? jo_class_name(self) : "";
 }
@@ -287,6 +344,12 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
     // SharedPreferences and its Editor
     if (strstr(cls, "SharedPreferences") || strstr(sc, "SharedPreferences"))
         return prefs_call(name, args, argc);
+
+    // Strings are FalsoJNI's (not our objects)
+    if (self && !jo_is_object(self) && (is(cls, "java/lang/String") || is(cls, "java/lang/CharSequence") ||
+                                        is(cls, "java/lang/Object"))) {
+        if (string_call(name, sig, self, args, argc, &r)) return r;
+    }
 
     // Constructors
     if (is(name, "<init>")) {
