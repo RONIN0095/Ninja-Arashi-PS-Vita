@@ -39,8 +39,9 @@
 // Unity's heap and il2cpp's GC heap come from newlib. The app gets ~365 MB in
 // extended mode (ATTRIBUTE2=12); outside the heap the libraries need ~58 MB,
 // plus a 41 MB temporary buffer while libil2cpp.so is read, plus stacks and
-// vitaGL. 300 MB left too little for loading.
-int _newlib_heap_size_user = 192 * 1024 * 1024;
+// vitaGL. 300 MB left too little for loading; with 192 MB the log showed
+// 100 MB still free after loading, so 248 MB leaves ~44 MB of margin.
+int _newlib_heap_size_user = 248 * 1024 * 1024;
 
 #ifdef USE_SCELIBC_IO
 int sceLibcHeapSize = 4 * 1024 * 1024;
