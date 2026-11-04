@@ -513,16 +513,16 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *player, SLD
         }
     } else if (loc == SL_DATALOCATOR_ANDROIDFD) {
         SLDataLocator_AndroidFD *fd = (SLDataLocator_AndroidFD *) src->pLocator;
-        // The fd belongs to the game's C library (SceLibc), not ours, so read
-        // the same bytes from the OBB ourselves: all music lives in the OBB
-        // and the locator gives its offset and length there.
+        // Android-fd players (from the Ninjago port). Unity/FMOD only uses
+        // buffer queues; should an fd player appear, the data is assumed to
+        // be inside the APK at the given offset.
         o->mp3_size = 0;
         o->mp3_fd = -1;
         if (fd->length > 0) {
             // Streamed in pieces by the mixer: reading a whole song here
             // froze the game for about a second whenever the music changed.
             o->mp3_data = malloc(MP3_CHUNK);
-            o->mp3_fd = sceIoOpen(OBB_PATH, SCE_O_RDONLY, 0);
+            o->mp3_fd = sceIoOpen(DATA_PATH "base.apk", SCE_O_RDONLY, 0);
             o->mp3_off = fd->offset;
             if (o->mp3_data && o->mp3_fd >= 0) o->mp3_size = (size_t) fd->length;
         }
