@@ -17,7 +17,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fnmatch.h>
 #include <math.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -504,6 +503,39 @@ static double wcstold_na(const wchar_t *s, wchar_t **e) { return wcstod(s, e); }
 
 static int unsetenv_na(const char *name) { return 0; }
 
+// fnmatch with '*', '?' and '[...]'; flags are ignored (newlib on the Vita has none)
+static int fnmatch_na(const char *p, const char *s, int flags) {
+    for (; *p; p++, s++) {
+        if (*p == '*') {
+            while (*p == '*') p++;
+            if (!*p) return 0;
+            for (; *s; s++)
+                if (fnmatch_na(p, s, flags) == 0) return 0;
+            return 1;
+        }
+        if (!*s) return 1;
+        if (*p == '[') {
+            const char *q = p + 1;
+            int neg = (*q == '!' || *q == '^');
+            if (neg) q++;
+            int ok = 0;
+            for (; *q && *q != ']'; q++) {
+                if (q[1] == '-' && q[2] && q[2] != ']') {
+                    if (*s >= q[0] && *s <= q[2]) ok = 1;
+                    q += 2;
+                } else if (*q == *s) {
+                    ok = 1;
+                }
+            }
+            if (ok == neg || !*q) return 1;
+            p = q;
+            continue;
+        }
+        if (*p != '?' && *p != *s) return 1;
+    }
+    return *s ? 1 : 0;
+}
+
 so_default_dynlib na_dynlib[] = {
     // stdio
     { "__sF", (uintptr_t)&sF_bionic },
@@ -561,7 +593,7 @@ so_default_dynlib na_dynlib[] = {
     { "sendfile", (uintptr_t)&fail_enosys },
     { "dup2", (uintptr_t)&fail_enosys },
     { "isatty", (uintptr_t)&isatty_na },
-    { "fnmatch", (uintptr_t)&fnmatch },
+    { "fnmatch", (uintptr_t)&fnmatch_na },
 
     // users / processes
     { "getuid", (uintptr_t)&get_uid },
