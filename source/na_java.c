@@ -638,7 +638,24 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         r.z = JNI_TRUE;
     } else if (is(name, "getIntent")) {
         r.l = jo_new_object("android/content/Intent");
-    } else if (is(name, "getStringExtra") || is(name, "getDataString") || is(name, "getAction")) {
+    } else if (is(name, "getStringExtra") && argc >= 1) {
+        // The "unity" extra is Unity's command line. Smaller allocator blocks:
+        // Unity reserves them up front, and on the Vita reserved memory is
+        // real memory (see mmap in reimpl/mem.c).
+        char *k = jo_jstring_to_utf8((jstring)args[0].l);
+        if (k && is(k, "unity")) {
+            r.l = jstr("-memorysetup-main-allocator-block-size=4194304"
+                       " -memorysetup-thread-allocator-block-size=2097152"
+                       " -memorysetup-gfx-main-allocator-block-size=2097152"
+                       " -memorysetup-gfx-thread-allocator-block-size=2097152"
+                       " -memorysetup-cache-allocator-block-size=1048576"
+                       " -memorysetup-typetree-allocator-block-size=1048576");
+            l_info("[JAVA] Intent extra \"unity\": memory setup arguments");
+        } else {
+            r.l = NULL;
+        }
+        free(k);
+    } else if (is(name, "getDataString") || is(name, "getAction")) {
         r.l = NULL;
     } else if (is(name, "getData") && strstr(sc, "Intent")) {
         r.l = NULL;

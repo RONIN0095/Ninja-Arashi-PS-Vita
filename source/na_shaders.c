@@ -57,6 +57,10 @@ static void sb_puts(sbuf *b, const char *s) {
 
 static const char *PRELUDE_COMMON =
     "#define roundEven(x) floor((x) + 0.5)\n"
+    "#define uint int\n"
+    "#define uvec2 ivec2\n"
+    "#define uvec3 ivec3\n"
+    "#define uvec4 ivec4\n"
     "vec4 texture(sampler2D s, vec2 c) { return tex2D(s, c); }\n"
     "vec4 texture(sampler2D s, vec2 c, float b) { return tex2Dbias(s, vec4(c, 0.0, b)); }\n"
     "vec4 texture(samplerCube s, vec3 c) { return texCUBE(s, c); }\n"
