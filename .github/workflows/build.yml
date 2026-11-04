@@ -1,0 +1,64 @@
+name: Build VPK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    name: Host checks (imports, shader translator)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every library import has a table entry
+        run: python3 tools/check_imports.py
+      - name: Shader translator builds and runs
+        run: |
+          cc -O1 -Wall -Isource tools/shader_test.c source/na_shaders.c -o shader_test
+          ./shader_test
+
+  vpk:
+    name: PS Vita (VPK)
+    runs-on: ubuntu-22.04
+    env:
+      VITASDK: /usr/local/vitasdk
+      # VitaSDK-softfp toolchain (same as the Ninjago port)
+      VITASDK_URL: https://github.com/vitasdk-softfp/autobuilds/releases/download/master-linux-v2.22/vitasdk-x86_64-linux-gnu-2025-12-27_21-40-50.tar.bz2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake make python3 curl bzip2 xz-utils patch git
+
+      - name: Install VitaSDK-softfp
+        run: |
+          sudo mkdir -p "$VITASDK"
+          sudo chown "$USER" "$VITASDK"
+          curl -sSL "$VITASDK_URL" | tar xj -C "$VITASDK" --strip-components=1
+          echo "$VITASDK/bin" >> "$GITHUB_PATH"
+
+      - name: Install VitaSDK-softfp packages
+        run: |
+          export PATH="$VITASDK/bin:$PATH"
+          git clone --depth 1 https://github.com/vitasdk-softfp/vdpm.git /tmp/vdpm
+          cd /tmp/vdpm && ./install-all.sh
+
+      # The vitaGL submodule needs newer SceGxm definitions than the toolchain ships.
+      - name: Update psp2 headers
+        run: |
+          git clone --depth 1 https://github.com/vitasdk/vita-headers.git /tmp/vita-headers
+          cp -r /tmp/vita-headers/include/psp2* "$VITASDK/arm-vita-eabi/include/"
+
+      - name: Build
+        run: |
+          export PATH="$VITASDK/bin:$PATH"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ninjaarashi-vpk
+          path: build/ninjaarashi.vpk

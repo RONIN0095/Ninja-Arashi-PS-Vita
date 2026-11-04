@@ -1,0 +1,670 @@
+/*
+ * Copyright (C) 2026 Vita port contributors
+ *
+ * This software may be modified and distributed under the terms
+ * of the MIT license. See the LICENSE file for details.
+ */
+
+/**
+ * @file  na_gles3.c
+ * @brief OpenGL ES 3.0 as Unity 6 sees it, on top of vitaGL (ES 2.0).
+ *
+ * Unity fetches every GL function with eglGetProcAddress()/dlsym(). The
+ * lookup goes:
+ *   1. the table below (ES 3.0 additions, version/limits queries, shader
+ *      translation, functions that must look absent),
+ *   2. vitaGL (vglGetProcAddress),
+ *   3. NULL, with a log line.
+ *
+ * Functions vitaGL does not have are either implemented on top of ES 2.0
+ * (glTexStorage2D, glClearBuffer*, glDrawBuffers, fences, ...) or are stubs
+ * that log their first call and return 0. Every name Unity asks for is
+ * logged once, so the log shows exactly what the game uses.
+ */
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <vitaGL.h>
+
+#include "na_shaders.h"
+#include "utils/logger.h"
+
+#ifndef GL_MAJOR_VERSION
+#define GL_MAJOR_VERSION 0x821B
+#define GL_MINOR_VERSION 0x821C
+#define GL_NUM_EXTENSIONS 0x821D
+#endif
+#define GL_MAX_3D_TEXTURE_SIZE_ 0x8073
+#define GL_MAX_ARRAY_TEXTURE_LAYERS_ 0x88FF
+#define GL_MAX_DRAW_BUFFERS_ 0x8824
+#define GL_MAX_COLOR_ATTACHMENTS_ 0x8CDF
+#define GL_MAX_SAMPLES_ 0x8D57
+#define GL_MAX_UNIFORM_BUFFER_BINDINGS_ 0x8A2F
+#define GL_MAX_UNIFORM_BLOCK_SIZE_ 0x8A30
+#define GL_MAX_VERTEX_UNIFORM_BLOCKS_ 0x8A2B
+#define GL_MAX_FRAGMENT_UNIFORM_BLOCKS_ 0x8A2D
+#define GL_MAX_COMBINED_UNIFORM_BLOCKS_ 0x8A2E
+#define GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT_ 0x8A34
+#define GL_MAX_VERTEX_OUTPUT_COMPONENTS_ 0x9122
+#define GL_MAX_FRAGMENT_INPUT_COMPONENTS_ 0x9125
+#define GL_MAX_VARYING_COMPONENTS_ 0x8B4B
+#define GL_MAX_ELEMENT_INDEX_ 0x8D6B
+#define GL_MAX_ELEMENTS_VERTICES_ 0x80E8
+#define GL_MAX_ELEMENTS_INDICES_ 0x80E9
+#define GL_MAX_PROGRAM_TEXEL_OFFSET_ 0x8905
+#define GL_MIN_PROGRAM_TEXEL_OFFSET_ 0x8904
+#define GL_NUM_PROGRAM_BINARY_FORMATS_ 0x87FE
+#define GL_NUM_SHADER_BINARY_FORMATS_ 0x8DF9
+#define GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS_ 0x8C8A
+#define GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS_ 0x8C8B
+#define GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS_ 0x8C80
+#define GL_MAX_VERTEX_UNIFORM_COMPONENTS_ 0x8B4A
+#define GL_MAX_FRAGMENT_UNIFORM_COMPONENTS_ 0x8B49
+#define GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS_ 0x8A31
+#define GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS_ 0x8A33
+#define GL_MAX_SERVER_WAIT_TIMEOUT_ 0x9111
+#define GL_MAX_TEXTURE_LOD_BIAS_ 0x84FD
+#define GL_READ_BUFFER_ 0x0C02
+#define GL_DRAW_BUFFER0_ 0x8825
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT_ 0x84FF
+#define GL_ACTIVE_UNIFORM_BLOCKS_ 0x8A36
+#define GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH_ 0x8A35
+#define GL_PROGRAM_BINARY_LENGTH_ 0x8741
+#define GL_UNIFORM_BLOCK_INDEX_ 0x8A3A
+#define GL_NUM_SAMPLE_COUNTS_ 0x9380
+#define GL_ALREADY_SIGNALED_ 0x911A
+#define GL_SHADER_TYPE_ 0x8B4F
+#define GL_COLOR_ 0x1800
+#define GL_DEPTH_ 0x1801
+#define GL_STENCIL_ 0x1802
+#define GL_DEPTH_STENCIL_ 0x84F9
+#define GL_TEXTURE_BINDING_2D_ 0x8069
+#define GL_TEXTURE_BINDING_CUBE_MAP_ 0x8514
+#ifndef GL_LOW_FLOAT
+#define GL_LOW_FLOAT 0x8DF0
+#define GL_MEDIUM_FLOAT 0x8DF1
+#define GL_HIGH_FLOAT 0x8DF2
+#endif
+#ifndef GL_DEPTH_STENCIL_OES
+#define GL_DEPTH_STENCIL_OES 0x84F9
+#endif
+#ifndef GL_UNSIGNED_INT_24_8_OES
+#define GL_UNSIGNED_INT_24_8_OES 0x84FA
+#endif
+
+/*
+ * Version and extensions
+ */
+static const char *extensions[] = {
+    "GL_EXT_texture_compression_s3tc",
+    "GL_EXT_texture_compression_dxt1",
+    "GL_IMG_texture_compression_pvrtc",
+    "GL_OES_compressed_ETC1_RGB8_texture",
+    "GL_OES_depth24",
+    "GL_OES_packed_depth_stencil",
+    "GL_OES_rgb8_rgba8",
+    "GL_OES_texture_npot",
+    "GL_OES_element_index_uint",
+    "GL_OES_vertex_array_object",
+    "GL_EXT_texture_format_BGRA8888",
+};
+#define N_EXTENSIONS ((int)(sizeof(extensions) / sizeof(extensions[0])))
+static char extension_string[1024];
+
+static const GLubyte *glGetString_na(GLenum name) {
+    switch (name) {
+        case GL_VENDOR: return (const GLubyte *)"vitaGL";
+        case GL_RENDERER: return (const GLubyte *)"vitaGL (PS Vita SGX543MP4+)";
+        case GL_VERSION: return (const GLubyte *)"OpenGL ES 3.0 vitaGL";
+        case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte *)"OpenGL ES GLSL ES 3.00";
+        case GL_EXTENSIONS:
+            if (!extension_string[0]) {
+                for (int i = 0; i < N_EXTENSIONS; i++) {
+                    strcat(extension_string, extensions[i]);
+                    strcat(extension_string, " ");
+                }
+            }
+            return (const GLubyte *)extension_string;
+        default:
+            return glGetString(name);
+    }
+}
+
+static const GLubyte *glGetStringi_na(GLenum name, GLuint index) {
+    if (name == GL_EXTENSIONS && index < (GLuint)N_EXTENSIONS)
+        return (const GLubyte *)extensions[index];
+    return NULL;
+}
+
+static int es3_integer(GLenum pname, GLint *v) {
+    switch (pname) {
+        case GL_MAJOR_VERSION: *v = 3; return 1;
+        case GL_MINOR_VERSION: *v = 0; return 1;
+        case GL_NUM_EXTENSIONS: *v = N_EXTENSIONS; return 1;
+        case GL_MAX_3D_TEXTURE_SIZE_: *v = 256; return 1;
+        case GL_MAX_ARRAY_TEXTURE_LAYERS_: *v = 256; return 1;
+        case GL_MAX_DRAW_BUFFERS_: *v = 1; return 1;
+        case GL_MAX_COLOR_ATTACHMENTS_: *v = 1; return 1;
+        case GL_MAX_SAMPLES_: *v = 1; return 1;
+        case GL_MAX_UNIFORM_BUFFER_BINDINGS_: *v = 24; return 1;
+        case GL_MAX_UNIFORM_BLOCK_SIZE_: *v = 16384; return 1;
+        case GL_MAX_VERTEX_UNIFORM_BLOCKS_: *v = 12; return 1;
+        case GL_MAX_FRAGMENT_UNIFORM_BLOCKS_: *v = 12; return 1;
+        case GL_MAX_COMBINED_UNIFORM_BLOCKS_: *v = 24; return 1;
+        case GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT_: *v = 256; return 1;
+        case GL_MAX_VERTEX_OUTPUT_COMPONENTS_: *v = 64; return 1;
+        case GL_MAX_FRAGMENT_INPUT_COMPONENTS_: *v = 60; return 1;
+        case GL_MAX_VARYING_COMPONENTS_: *v = 60; return 1;
+        case GL_MAX_ELEMENT_INDEX_: *v = 0xFFFFFF; return 1;
+        case GL_MAX_ELEMENTS_VERTICES_: *v = 65536; return 1;
+        case GL_MAX_ELEMENTS_INDICES_: *v = 65536; return 1;
+        case GL_MAX_PROGRAM_TEXEL_OFFSET_: *v = 7; return 1;
+        case GL_MIN_PROGRAM_TEXEL_OFFSET_: *v = -8; return 1;
+        case GL_NUM_PROGRAM_BINARY_FORMATS_: *v = 0; return 1;
+        case GL_NUM_SHADER_BINARY_FORMATS_: *v = 0; return 1;
+        case GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS_: *v = 64; return 1;
+        case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS_: *v = 4; return 1;
+        case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS_: *v = 4; return 1;
+        case GL_MAX_VERTEX_UNIFORM_COMPONENTS_: *v = 1024; return 1;
+        case GL_MAX_FRAGMENT_UNIFORM_COMPONENTS_: *v = 896; return 1;
+        case GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS_: *v = 1024; return 1;
+        case GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS_: *v = 896; return 1;
+        case GL_MAX_SERVER_WAIT_TIMEOUT_: *v = 0; return 1;
+        case GL_READ_BUFFER_: *v = GL_BACK; return 1;
+        case GL_DRAW_BUFFER0_: *v = GL_BACK; return 1;
+        default: return 0;
+    }
+}
+
+static void glGetIntegerv_na(GLenum pname, GLint *data) {
+    if (!es3_integer(pname, data))
+        glGetIntegerv(pname, data);
+}
+
+static void glGetInteger64v_na(GLenum pname, int64_t *data) {
+    GLint v = 0;
+    if (pname == GL_MAX_SERVER_WAIT_TIMEOUT_) {
+        *data = 0;
+        return;
+    }
+    glGetIntegerv_na(pname, &v);
+    *data = v;
+}
+
+static void glGetFloatv_na(GLenum pname, GLfloat *data) {
+    GLint v;
+    if (pname == GL_MAX_TEXTURE_LOD_BIAS_) {
+        *data = 15.0f;
+        return;
+    }
+    if (es3_integer(pname, &v)) {
+        *data = (GLfloat)v;
+        return;
+    }
+    glGetFloatv(pname, data);
+}
+
+static void glGetBooleanv_na(GLenum pname, GLboolean *data) {
+    GLint v;
+    if (es3_integer(pname, &v)) {
+        *data = v ? GL_TRUE : GL_FALSE;
+        return;
+    }
+    glGetBooleanv(pname, data);
+}
+
+/*
+ * Shaders: GLSL ES 3.00 -> 1.00 (na_shaders.c)
+ */
+#define MAX_SHADER_IDS 8192
+static uint8_t shader_is_fragment[MAX_SHADER_IDS];
+
+static GLuint glCreateShader_na(GLenum type) {
+    GLuint s = glCreateShader(type);
+    if (s < MAX_SHADER_IDS) shader_is_fragment[s] = (type == GL_FRAGMENT_SHADER);
+    return s;
+}
+
+static int shaders_seen = 0;
+
+static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) {
+    // Join the parts
+    size_t total = 0;
+    for (int i = 0; i < count; i++)
+        total += length && length[i] >= 0 ? (size_t)length[i] : strlen(string[i]);
+    char *src = malloc(total + 1);
+    size_t pos = 0;
+    for (int i = 0; i < count; i++) {
+        size_t n = length && length[i] >= 0 ? (size_t)length[i] : strlen(string[i]);
+        memcpy(src + pos, string[i], n);
+        pos += n;
+    }
+    src[pos] = 0;
+
+    int frag = shader < MAX_SHADER_IDS ? shader_is_fragment[shader] : 0;
+    int changed = 0;
+    char *t = na_shaders_translate(src, frag, &changed);
+    if (shaders_seen++ < 4) {
+        l_info("glShaderSource(%u, %s): %u bytes%s", shader, frag ? "fragment" : "vertex",
+               (unsigned)pos, t ? ", translated from GLSL ES 3.00" : "");
+    }
+    const GLchar *s = t ? t : src;
+    GLint len = (GLint)strlen(s);
+    glShaderSource(shader, 1, &s, &len);
+    free(t);
+    free(src);
+}
+
+static void glGetProgramiv_na(GLuint program, GLenum pname, GLint *params) {
+    switch (pname) {
+        case GL_ACTIVE_UNIFORM_BLOCKS_:
+        case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH_:
+        case GL_PROGRAM_BINARY_LENGTH_:
+            *params = 0;
+            return;
+        default:
+            glGetProgramiv(program, pname, params);
+    }
+}
+
+static void glGetActiveUniformBlockiv_na(GLuint p, GLuint i, GLenum pname, GLint *params) { *params = 0; }
+
+static void glGetActiveUniformBlockName_na(GLuint p, GLuint i, GLsizei bufsize, GLsizei *length, GLchar *name) {
+    if (length) *length = 0;
+    if (name && bufsize > 0) name[0] = 0;
+}
+
+static void glGetUniformIndices_na(GLuint p, GLsizei count, const GLchar *const *names, GLuint *indices) {
+    for (int i = 0; i < count; i++) indices[i] = 0xFFFFFFFF; // GL_INVALID_INDEX
+}
+
+static void glGetActiveUniformsiv_na(GLuint p, GLsizei count, const GLuint *indices, GLenum pname, GLint *params) {
+    for (int i = 0; i < count; i++)
+        params[i] = (pname == GL_UNIFORM_BLOCK_INDEX_) ? -1 : 0;
+}
+
+static void glGetShaderPrecisionFormat_na(GLenum shadertype, GLenum precisiontype, GLint *range, GLint *precision) {
+    switch (precisiontype) {
+        case GL_LOW_FLOAT: case GL_MEDIUM_FLOAT: case GL_HIGH_FLOAT:
+            range[0] = 127; range[1] = 127; *precision = 23;
+            break;
+        default:
+            range[0] = 31; range[1] = 30; *precision = 0;
+            break;
+    }
+}
+
+static void glDetachShader_na(GLuint p, GLuint s) {}
+static void glValidateProgram_na(GLuint p) {}
+static GLboolean glIsVertexArray_na(GLuint a) { return a != 0; }
+static void glProgramParameteri_na(GLuint p, GLenum pname, GLint v) {}
+
+/*
+ * Textures: immutable storage on top of glTexImage2D
+ */
+typedef struct {
+    GLuint tex;
+    GLenum ifmt;
+    GLsizei levels, w, h;
+} tex_storage;
+
+#define MAX_STORAGE 4096
+static tex_storage storage[MAX_STORAGE];
+
+static tex_storage *storage_for(GLuint tex, int create) {
+    uint32_t h = (tex * 2654435761u) % MAX_STORAGE;
+    for (int n = 0; n < MAX_STORAGE; n++) {
+        tex_storage *s = &storage[(h + n) % MAX_STORAGE];
+        if (s->tex == tex) return s;
+        if (s->tex == 0) {
+            if (!create) return NULL;
+            s->tex = tex;
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static GLuint bound_texture(GLenum target) {
+    GLint t = 0;
+    glGetIntegerv(target == GL_TEXTURE_CUBE_MAP || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)
+                  ? GL_TEXTURE_BINDING_CUBE_MAP_ : GL_TEXTURE_BINDING_2D_, &t);
+    return (GLuint)t;
+}
+
+// Sized internal format -> format/type for glTexImage2D. Returns 0 for compressed formats.
+static int sized_to_unsized(GLenum ifmt, GLenum *format, GLenum *type) {
+    *type = GL_UNSIGNED_BYTE;
+    switch (ifmt) {
+        case 0x8058: /* RGBA8 */ case 0x8C43: /* SRGB8_ALPHA8 */ case GL_RGBA:
+        case 0x881A: /* RGBA16F */ case 0x8059: /* RGB10_A2 */
+            *format = GL_RGBA; return 1;
+        case 0x8051: /* RGB8 */ case 0x8C41: /* SRGB8 */ case GL_RGB: case 0x8C3A: /* R11F_G11F_B10F */
+            *format = GL_RGB; return 1;
+        case 0x8D62: /* RGB565 */
+            *format = GL_RGB; *type = GL_UNSIGNED_SHORT_5_6_5; return 1;
+        case 0x8056: /* RGBA4 */
+            *format = GL_RGBA; *type = GL_UNSIGNED_SHORT_4_4_4_4; return 1;
+        case 0x8057: /* RGB5_A1 */
+            *format = GL_RGBA; *type = GL_UNSIGNED_SHORT_5_5_5_1; return 1;
+        case 0x8229: /* R8 */ case 0x822D: /* R16F */
+            *format = GL_LUMINANCE; return 1;
+        case 0x822B: /* RG8 */
+            *format = GL_LUMINANCE_ALPHA; return 1;
+        case GL_ALPHA: *format = GL_ALPHA; return 1;
+        case GL_LUMINANCE: *format = GL_LUMINANCE; return 1;
+        case GL_LUMINANCE_ALPHA: *format = GL_LUMINANCE_ALPHA; return 1;
+        case 0x81A5: /* DEPTH_COMPONENT16 */ case 0x81A6: /* DEPTH_COMPONENT24 */ case 0x8CAC: /* DEPTH_COMPONENT32F */
+            *format = GL_DEPTH_COMPONENT; *type = GL_UNSIGNED_INT; return 1;
+        case 0x88F0: /* DEPTH24_STENCIL8 */
+            *format = GL_DEPTH_STENCIL_OES; *type = GL_UNSIGNED_INT_24_8_OES; return 1;
+        default:
+            return 0;
+    }
+}
+
+static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
+    GLuint tex = bound_texture(target);
+    tex_storage *s = storage_for(tex, 1);
+    if (s) {
+        s->ifmt = ifmt;
+        s->levels = levels;
+        s->w = w;
+        s->h = h;
+    }
+    GLenum format, type;
+    if (!sized_to_unsized(ifmt, &format, &type)) {
+        // Compressed: allocated on the first full-level glCompressedTexSubImage2D
+        return;
+    }
+    int faces = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    for (int f = 0; f < faces; f++) {
+        GLenum t = faces == 6 ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + f : target;
+        for (int l = 0; l < levels; l++) {
+            GLsizei lw = w >> l, lh = h >> l;
+            if (lw < 1) lw = 1;
+            if (lh < 1) lh = 1;
+            glTexImage2D(t, l, format, lw, lh, 0, format, type, NULL);
+        }
+    }
+}
+
+static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+                                         GLenum format, GLsizei size, const void *data) {
+    tex_storage *s = storage_for(bound_texture(target), 0);
+    GLsizei lw = s ? s->w >> level : w, lh = s ? s->h >> level : h;
+    if (lw < 1) lw = 1;
+    if (lh < 1) lh = 1;
+    if (x == 0 && y == 0 && w >= lw && h >= lh) {
+        glCompressedTexImage2D(target, level, format, w, h, 0, size, data);
+    } else {
+        static int warned = 0;
+        if (warned++ < 8)
+            l_warn("glCompressedTexSubImage2D: partial update (%d,%d %dx%d of %dx%d) ignored", x, y, w, h, lw, lh);
+    }
+}
+
+static void glGetTexLevelParameteriv_na(GLenum target, GLint level, GLenum pname, GLint *params) { *params = 0; }
+static void glGetTexLevelParameterfv_na(GLenum target, GLint level, GLenum pname, GLfloat *params) { *params = 0; }
+static void glGetTexParameteriv_na(GLenum target, GLenum pname, GLint *params) { *params = 0; }
+
+static void glGetInternalformativ_na(GLenum target, GLenum ifmt, GLenum pname, GLsizei bufsize, GLint *params) {
+    if (pname == GL_NUM_SAMPLE_COUNTS_ && bufsize > 0) params[0] = 0;
+}
+
+/*
+ * Framebuffers
+ */
+static GLfloat clear_color[4] = { 0, 0, 0, 0 };
+static GLfloat clear_depth = 1.0f;
+static GLint clear_stencil = 0;
+
+static void glClearColor_na(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
+    clear_color[0] = r; clear_color[1] = g; clear_color[2] = b; clear_color[3] = a;
+    glClearColor(r, g, b, a);
+}
+
+static void glClearDepthf_na(GLfloat d) {
+    clear_depth = d;
+    glClearDepthf(d);
+}
+
+static void glClearStencil_na(GLint s) {
+    clear_stencil = s;
+    glClearStencil(s);
+}
+
+static void glClearBufferfv_na(GLenum buffer, GLint drawbuffer, const GLfloat *v) {
+    if (buffer == GL_COLOR_) {
+        glClearColor(v[0], v[1], v[2], v[3]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+    } else if (buffer == GL_DEPTH_) {
+        glClearDepthf(v[0]);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glClearDepthf(clear_depth);
+    }
+}
+
+static void glClearBufferiv_na(GLenum buffer, GLint drawbuffer, const GLint *v) {
+    if (buffer == GL_STENCIL_) {
+        glClearStencil(v[0]);
+        glClear(GL_STENCIL_BUFFER_BIT);
+        glClearStencil(clear_stencil);
+    }
+}
+
+static void glClearBufferuiv_na(GLenum buffer, GLint drawbuffer, const GLuint *v) {
+    if (buffer == GL_COLOR_) {
+        GLfloat f[4] = { v[0] / 255.0f, v[1] / 255.0f, v[2] / 255.0f, v[3] / 255.0f };
+        glClearBufferfv_na(buffer, drawbuffer, f);
+    }
+}
+
+static void glClearBufferfi_na(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
+    glClearDepthf(depth);
+    glClearStencil(stencil);
+    glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glClearDepthf(clear_depth);
+    glClearStencil(clear_stencil);
+}
+
+static void glDrawBuffers_na(GLsizei n, const GLenum *bufs) {}
+static void glInvalidateFramebuffer_na(GLenum target, GLsizei n, const GLenum *attachments) {}
+
+static void glRenderbufferStorageMultisample_na(GLenum target, GLsizei samples, GLenum ifmt, GLsizei w, GLsizei h) {
+    glRenderbufferStorage(target, ifmt, w, h);
+}
+
+static void glGetRenderbufferParameteriv_na(GLenum target, GLenum pname, GLint *params) { *params = 0; }
+
+static void glColorMaski_na(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+    if (i == 0) glColorMask(r, g, b, a);
+}
+
+static void glBlendEquationi_na(GLuint i, GLenum mode) {
+    if (i == 0) glBlendEquation(mode);
+}
+
+static void glBlendEquationSeparatei_na(GLuint i, GLenum rgb, GLenum alpha) {
+    if (i == 0) glBlendEquationSeparate(rgb, alpha);
+}
+
+static void glBlendFuncSeparatei_na(GLuint i, GLenum sr, GLenum dr, GLenum sa, GLenum da) {
+    if (i == 0) glBlendFuncSeparate(sr, dr, sa, da);
+}
+
+/*
+ * Vertex input / uniforms
+ */
+static void glVertexAttribIPointer_na(GLuint index, GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    glVertexAttribPointer(index, size, type, GL_FALSE, stride, ptr);
+}
+
+#define UIV(n) \
+    static void glUniform##n##uiv_na(GLint loc, GLsizei count, const GLuint *v) { \
+        glUniform##n##iv(loc, count, (const GLint *)v); \
+    }
+UIV(1) UIV(2) UIV(3) UIV(4)
+
+static void glGetUniformiv_na(GLuint p, GLint loc, GLint *params) { *params = 0; }
+
+static void glDrawElementsInstancedBaseVertex_na(GLenum mode, GLsizei count, GLenum type, const void *indices,
+                                                 GLsizei instances, GLint basevertex) {
+    if (basevertex == 0)
+        glDrawElementsInstanced(mode, count, type, indices, instances);
+    else
+        glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+}
+
+/*
+ * Sync objects: vitaGL submits in order, so fences are always signaled.
+ */
+static void *glFenceSync_na(GLenum cond, GLbitfield flags) { return (void *)1; }
+static GLenum glClientWaitSync_na(void *sync, GLbitfield flags, uint64_t timeout) { return GL_ALREADY_SIGNALED_; }
+static void glWaitSync_na(void *sync, GLbitfield flags, uint64_t timeout) {}
+static void glDeleteSync_na(void *sync) {}
+static GLboolean glIsSync_na(void *sync) { return sync != NULL; }
+
+/*
+ * Stubs: log the first call, return 0
+ */
+#define STUB(name) \
+    static int name##_stub(void) { \
+        static int called = 0; \
+        if (!called++) l_warn("GL stub called: " #name); \
+        return 0; \
+    }
+
+STUB(glTexImage3D) STUB(glTexSubImage3D) STUB(glTexStorage3D) STUB(glCompressedTexImage3D)
+STUB(glCompressedTexSubImage3D) STUB(glFramebufferTextureLayer) STUB(glFramebufferTexture3D)
+STUB(glCopyBufferSubData) STUB(glCopyImageSubData) STUB(glTexBuffer) STUB(glTexStorage2DMultisample)
+STUB(glTexStorage3DMultisample) STUB(glTexImage2DMultisample) STUB(glFramebufferTexture2DMultisample)
+STUB(glResolveMultisampleFramebuffer) STUB(glTexPageCommitment) STUB(glTextureView)
+STUB(glGetTextureParameteriv) STUB(glDispatchCompute) STUB(glDispatchComputeIndirect)
+STUB(glMemoryBarrier) STUB(glBindImageTexture) STUB(glDrawArraysIndirect) STUB(glDrawElementsIndirect)
+STUB(glPatchParameteri) STUB(glGetProgramInterfaceiv) STUB(glGetProgramResourceIndex)
+STUB(glGetProgramResourceName) STUB(glGetProgramResourceiv) STUB(glGenQueriesEXT) STUB(glDeleteQueriesEXT)
+STUB(glBeginQueryEXT) STUB(glEndQueryEXT) STUB(glGetQueryiv) STUB(glGetQueryObjectui64v)
+STUB(glProgramUniformExtra) STUB(glBlendBarrier) STUB(glMultiview) STUB(glDebug)
+
+typedef struct {
+    const char *name;
+    void *func;
+} gl_entry;
+
+#define E(n) { #n, (void *)&n##_na }
+#define S(n, s) { #n, (void *)&s##_stub }
+#define HIDE(n) { #n, NULL }
+
+static const gl_entry gl_table[] = {
+    E(glGetString), E(glGetStringi), E(glGetIntegerv), E(glGetInteger64v), E(glGetFloatv), E(glGetBooleanv),
+    E(glCreateShader), E(glShaderSource), E(glGetProgramiv),
+    E(glGetActiveUniformBlockiv), E(glGetActiveUniformBlockName), E(glGetUniformIndices),
+    E(glGetActiveUniformsiv), E(glGetShaderPrecisionFormat), E(glDetachShader), E(glValidateProgram),
+    E(glIsVertexArray), E(glProgramParameteri),
+    E(glTexStorage2D), { "glTexStorage2DEXT", (void *)&glTexStorage2D_na },
+    E(glCompressedTexSubImage2D), E(glGetTexLevelParameteriv), E(glGetTexLevelParameterfv),
+    E(glGetTexParameteriv), E(glGetInternalformativ),
+    E(glClearColor), E(glClearDepthf), E(glClearStencil),
+    E(glClearBufferfv), E(glClearBufferiv), E(glClearBufferuiv), E(glClearBufferfi),
+    E(glDrawBuffers), E(glInvalidateFramebuffer), E(glRenderbufferStorageMultisample),
+    { "glRenderbufferStorageMultisampleEXT", (void *)&glRenderbufferStorageMultisample_na },
+    { "glRenderbufferStorageMultisampleIMG", (void *)&glRenderbufferStorageMultisample_na },
+    { "glRenderbufferStorageMultisampleAPPLE", (void *)&glRenderbufferStorageMultisample_na },
+    E(glGetRenderbufferParameteriv), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glBlendFuncSeparatei),
+    E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
+    E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
+    { "glDrawElementsInstancedBaseVertexEXT", (void *)&glDrawElementsInstancedBaseVertex_na },
+    { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
+    { "glDrawElementsBaseVertexEXT", (void *)&glDrawElementsBaseVertex },
+    { "glDrawElementsBaseVertexOES", (void *)&glDrawElementsBaseVertex },
+    E(glFenceSync), E(glClientWaitSync), E(glWaitSync), E(glDeleteSync), E(glIsSync),
+
+    // Program binaries lose vitaGL's attribute bindings: let Unity compile from source
+    HIDE(glGetProgramBinary), HIDE(glProgramBinary), HIDE(glGetProgramBinaryOES), HIDE(glProgramBinaryOES),
+
+    // Stubs
+    S(glTexImage3D, glTexImage3D), S(glTexSubImage3D, glTexSubImage3D), S(glTexStorage3D, glTexStorage3D),
+    S(glTexStorage3DEXT, glTexStorage3D), S(glCompressedTexImage3D, glCompressedTexImage3D),
+    S(glCompressedTexSubImage3D, glCompressedTexSubImage3D),
+    S(glFramebufferTextureLayer, glFramebufferTextureLayer), S(glFramebufferTexture3D, glFramebufferTexture3D),
+    S(glCopyBufferSubData, glCopyBufferSubData),
+    S(glCopyImageSubData, glCopyImageSubData), S(glCopyImageSubDataEXT, glCopyImageSubData),
+    S(glCopyImageSubDataOES, glCopyImageSubData),
+    S(glTexBuffer, glTexBuffer), S(glTexBufferEXT, glTexBuffer),
+    S(glTexStorage2DMultisample, glTexStorage2DMultisample), S(glTexStorage3DMultisample, glTexStorage3DMultisample),
+    S(glTexImage2DMultisample, glTexImage2DMultisample),
+    S(glFramebufferTexture2DMultisampleEXT, glFramebufferTexture2DMultisample),
+    S(glFramebufferTexture2DMultisampleIMG, glFramebufferTexture2DMultisample),
+    S(glResolveMultisampleFramebufferAPPLE, glResolveMultisampleFramebuffer),
+    S(glTexPageCommitmentARB, glTexPageCommitment), S(glTexPageCommitmentEXT, glTexPageCommitment),
+    S(glTextureView, glTextureView), S(glTextureViewEXT, glTextureView), S(glTextureViewOES, glTextureView),
+    S(glGetTextureParameteriv, glGetTextureParameteriv),
+    S(glDispatchCompute, glDispatchCompute), S(glDispatchComputeIndirect, glDispatchComputeIndirect),
+    S(glMemoryBarrier, glMemoryBarrier), S(glBindImageTexture, glBindImageTexture),
+    S(glDrawArraysIndirect, glDrawArraysIndirect), S(glDrawElementsIndirect, glDrawElementsIndirect),
+    S(glPatchParameteri, glPatchParameteri), S(glPatchParameteriEXT, glPatchParameteri),
+    S(glPatchParameteriOES, glPatchParameteri),
+    S(glGetProgramInterfaceiv, glGetProgramInterfaceiv), S(glGetProgramResourceIndex, glGetProgramResourceIndex),
+    S(glGetProgramResourceName, glGetProgramResourceName), S(glGetProgramResourceiv, glGetProgramResourceiv),
+    S(glGenQueriesEXT, glGenQueriesEXT), S(glDeleteQueriesEXT, glDeleteQueriesEXT),
+    S(glBeginQueryEXT, glBeginQueryEXT), S(glEndQueryEXT, glEndQueryEXT), S(glGetQueryiv, glGetQueryiv),
+    S(glGetQueryObjectui64vEXT, glGetQueryObjectui64v), S(glGetQueryObjectui64vNV, glGetQueryObjectui64v),
+    S(glProgramUniform1uiv, glProgramUniformExtra), S(glProgramUniform2uiv, glProgramUniformExtra),
+    S(glProgramUniform3uiv, glProgramUniformExtra), S(glProgramUniform4uiv, glProgramUniformExtra),
+    S(glProgramUniformMatrix2x3fv, glProgramUniformExtra), S(glProgramUniformMatrix2x4fv, glProgramUniformExtra),
+    S(glProgramUniformMatrix3x2fv, glProgramUniformExtra), S(glProgramUniformMatrix3x4fv, glProgramUniformExtra),
+    S(glProgramUniformMatrix4x2fv, glProgramUniformExtra), S(glProgramUniformMatrix4x3fv, glProgramUniformExtra),
+    S(glBlendBarrier, glBlendBarrier), S(glBlendBarrierKHR, glBlendBarrier), S(glBlendBarrierNV, glBlendBarrier),
+    S(glFramebufferTextureMultiviewOVR, glMultiview), S(glFramebufferTextureMultisampleMultiviewOVR, glMultiview),
+    S(glDebugMessageCallback, glDebug), S(glDebugMessageCallbackKHR, glDebug),
+    S(glDebugMessageControl, glDebug), S(glDebugMessageControlKHR, glDebug),
+    S(glDebugMessageInsert, glDebug), S(glDebugMessageInsertKHR, glDebug),
+    S(glObjectLabel, glDebug), S(glObjectLabelKHR, glDebug), S(glLabelObjectEXT, glDebug),
+    S(glGetObjectLabel, glDebug), S(glGetObjectLabelKHR, glDebug), S(glGetObjectLabelEXT, glDebug),
+    S(glPushDebugGroup, glDebug), S(glPushDebugGroupKHR, glDebug),
+    S(glPopDebugGroup, glDebug), S(glPopDebugGroupKHR, glDebug),
+    S(glPushGroupMarkerEXT, glDebug), S(glPopGroupMarkerEXT, glDebug),
+    S(eglCreateSyncKHR, glDebug), S(eglDestroySyncKHR, glDebug), S(eglClientWaitSyncKHR, glDebug),
+    S(eglGetFrameTimestampSupportedANDROID, glDebug), S(eglGetFrameTimestampsANDROID, glDebug),
+    S(eglGetNextFrameIdANDROID, glDebug),
+};
+
+#define N_GL_TABLE ((int)(sizeof(gl_table) / sizeof(gl_table[0])))
+
+// Each name is logged once: the log then lists every GL function Unity uses.
+#define MAX_LOGGED 512
+static const char *logged[MAX_LOGGED];
+static int n_logged = 0;
+
+static void log_lookup(const char *name, const char *how) {
+    for (int i = 0; i < n_logged; i++)
+        if (strcmp(logged[i], name) == 0) return;
+    if (n_logged < MAX_LOGGED) logged[n_logged++] = strdup(name);
+    l_info("[GL] %s: %s", name, how);
+}
+
+void *na_gl_get_proc(const char *name) {
+    if (!name || (strncmp(name, "gl", 2) != 0 && strncmp(name, "egl", 3) != 0))
+        return NULL;
+    for (int i = 0; i < N_GL_TABLE; i++) {
+        if (strcmp(name, gl_table[i].name) == 0) {
+            log_lookup(name, gl_table[i].func ? "loader" : "hidden");
+            return gl_table[i].func;
+        }
+    }
+    if (strncmp(name, "egl", 3) == 0) return NULL;
+    void *f = vglGetProcAddress(name);
+    log_lookup(name, f ? "vitaGL" : "MISSING");
+    return f;
+}
+
+void na_gles3_init(void) {
+    // ETC2 textures (most of the game) are decoded and re-compressed to DXT5
+    // instead of being stored as RGBA8 (4x the memory).
+    glHint(GL_TEXTURE_COMPRESSION_HINT, GL_NICEST);
+}
