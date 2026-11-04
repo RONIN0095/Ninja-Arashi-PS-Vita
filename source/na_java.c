@@ -21,6 +21,7 @@
 #include "jni_objects.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,8 @@
 #include <psp2/kernel/processmgr.h>
 
 #include "na_android.h"
+#include "na_apk.h"
+#include "na_input.h"
 #include "utils/logger.h"
 
 #define APK_PATH DATA_PATH "base.apk"
@@ -341,6 +344,23 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
     r.j = 0;
     const char *sc = self_class(self);
 
+    // Input events (na_input.c)
+    if (self && jo_is_object(self) && na_input_event_call(name, sig, self, args, argc, &r))
+        return r;
+    if (strstr(sc, "InputDevice") || strstr(cls, "InputDevice")) {
+        if (is(name, "getSources")) r.i = 0x1002 | 0x401 | 0x101;
+        else if (is(name, "getName")) r.l = jstr("PS Vita");
+        else if (is(name, "getDescriptor")) r.l = jstr("vita-builtin");
+        else if (is(name, "getVendorId")) r.i = 0x054c;
+        else if (is(name, "getProductId")) r.i = 0x0001;
+        else if (is(name, "getId")) r.i = 1;
+        else if (is(name, "getDevice")) r.l = jo_new_object("android/view/InputDevice");
+        else if (is(name, "getDeviceIds")) r.l = NULL;
+        else if (is(name, "getKeyboardType")) r.i = 1;
+        else r = default_return(sig);
+        return r;
+    }
+
     // SharedPreferences and its Editor
     if (strstr(cls, "SharedPreferences") || strstr(sc, "SharedPreferences"))
         return prefs_call(name, args, argc);
@@ -353,6 +373,8 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
 
     // Constructors
     if (is(name, "<init>")) {
+        if (strstr(cls, "Scanner") && argc >= 1 && strncmp(sig, "(Ljava/io/InputStream;", 22) == 0)
+            jo_set_obj(self, "__in", args[0].l);
         if (strstr(cls, "java/io/File") && argc >= 1) {
             // File(String) or File(File parent, String child)
             char *a0 = NULL, *a1 = NULL;
@@ -466,6 +488,160 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         r.i = SCREEN_W;
     } else if (is(name, "getHeight") && strstr(sc, "Display")) {
         r.i = SCREEN_H;
+
+    // Assets from the APK: AssetManager.open() -> InputStream, read through Scanner/read()
+    } else if (is(name, "open") && (strstr(cls, "AssetManager") || strstr(sc, "AssetManager")) && argc >= 1) {
+        char *n = jo_jstring_to_utf8((jstring)args[0].l);
+        char path[512];
+        snprintf(path, sizeof(path), "assets/%s", n ? n : "");
+        size_t size = 0;
+        void *data = na_apk_read(path, &size);
+        l_info("[JAVA] AssetManager.open(%s): %s", n ? n : "?", data ? "found" : "not found");
+        free(n);
+        if (data) {
+            jobject in = jo_new_object("java/io/InputStream");
+            jo_set_long(in, "__data", (jlong)(uintptr_t)data);
+            jo_set_long(in, "__size", (jlong)size);
+            jo_set_long(in, "__pos", 0);
+            r.l = in;
+        } else {
+            r.l = NULL;
+        }
+    } else if (strstr(sc, "Scanner") && is(name, "useDelimiter")) {
+        r.l = self;
+    } else if (strstr(sc, "Scanner") && (is(name, "next") || is(name, "nextLine"))) {
+        jobject in = jo_get_obj(self, "__in");
+        char *d = in ? (char *)(uintptr_t)jo_get_long(in, "__data") : NULL;
+        jlong pos = in ? jo_get_long(in, "__pos") : 0, size = in ? jo_get_long(in, "__size") : 0;
+        if (d && pos < size) {
+            r.l = jstr(d + pos);
+            jo_set_long(in, "__pos", size);
+        } else {
+            r.l = jstr("");
+        }
+    } else if (strstr(sc, "Scanner") && is(name, "hasNext")) {
+        jobject in = jo_get_obj(self, "__in");
+        r.z = in && jo_get_long(in, "__pos") < jo_get_long(in, "__size");
+    } else if (strstr(sc, "InputStream") && is(name, "available")) {
+        r.i = (jint)(jo_get_long(self, "__size") - jo_get_long(self, "__pos"));
+    } else if (strstr(sc, "InputStream") && is(name, "read")) {
+        uint8_t *d = (uint8_t *)(uintptr_t)jo_get_long(self, "__data");
+        jlong pos = jo_get_long(self, "__pos"), size = jo_get_long(self, "__size");
+        if (!d || pos >= size) {
+            r.i = -1;
+        } else if (argc == 0) {
+            r.i = d[pos];
+            jo_set_long(self, "__pos", pos + 1);
+        } else {
+            jint off = argc >= 3 ? args[1].i : 0;
+            jint len = argc >= 3 ? args[2].i : (*env())->GetArrayLength(env(), (jarray)args[0].l);
+            if (len > size - pos) len = (jint)(size - pos);
+            (*env())->SetByteArrayRegion(env(), (jbyteArray)args[0].l, off, len, (const jbyte *)(d + pos));
+            jo_set_long(self, "__pos", pos + len);
+            r.i = len;
+        }
+    } else if (strstr(sc, "InputStream") && is(name, "skip")) {
+        jlong pos = jo_get_long(self, "__pos"), size = jo_get_long(self, "__size");
+        jlong n = args[0].j;
+        if (n > size - pos) n = size - pos;
+        jo_set_long(self, "__pos", pos + n);
+        r.j = n;
+    } else if (strstr(sc, "InputStream") && is(name, "close")) {
+        free((void *)(uintptr_t)jo_get_long(self, "__data"));
+        jo_set_long(self, "__data", 0);
+
+    // System services
+    } else if (is(name, "getSystemService") && argc >= 1) {
+        char *n = jo_jstring_to_utf8((jstring)args[0].l);
+        const char *c = "java/lang/Object";
+        if (n) {
+            if (is(n, "activity")) c = "android/app/ActivityManager";
+            else if (is(n, "window")) c = "android/view/WindowManager";
+            else if (is(n, "audio")) c = "android/media/AudioManager";
+            else if (is(n, "display")) c = "android/hardware/display/DisplayManager";
+            else if (is(n, "power")) c = "android/os/PowerManager";
+            else if (is(n, "input")) c = "android/hardware/input/InputManager";
+            else if (is(n, "vibrator")) c = "android/os/Vibrator";
+            else if (is(n, "sensor")) c = "android/hardware/SensorManager";
+            else if (is(n, "connectivity")) c = "android/net/ConnectivityManager";
+            else if (is(n, "wifi")) c = "android/net/wifi/WifiManager";
+            else if (is(n, "accessibility")) c = "android/view/accessibility/AccessibilityManager";
+        }
+        l_info("[JAVA] getSystemService(%s)", n ? n : "?");
+        free(n);
+        r.l = jo_new_object(c);
+    } else if (is(name, "getMemoryInfo") && argc >= 1 && args[0].l) {
+        jo_set_long(args[0].l, "totalMem", 512LL * 1024 * 1024);
+        jo_set_long(args[0].l, "availMem", 160LL * 1024 * 1024);
+        jo_set_long(args[0].l, "threshold", 32LL * 1024 * 1024);
+        jo_set_bool(args[0].l, "lowMemory", JNI_FALSE);
+    } else if (is(name, "getMemoryClass")) {
+        r.i = 256;
+    } else if (is(name, "getLargeMemoryClass")) {
+        r.i = 512;
+    } else if (is(name, "isLowRamDevice")) {
+        r.z = JNI_FALSE;
+    } else if (is(name, "getDefaultDisplay") || is(name, "getDisplay")) {
+        r.l = jo_new_object("android/view/Display");
+    } else if ((is(name, "getSize") || is(name, "getRealSize")) && argc >= 1 && args[0].l) {
+        jo_set_int(args[0].l, "x", SCREEN_W);
+        jo_set_int(args[0].l, "y", SCREEN_H);
+    } else if (is(name, "getMode")) {
+        r.l = jo_new_object("android/view/Display$Mode");
+    } else if (is(name, "getPhysicalWidth")) {
+        r.i = SCREEN_W;
+    } else if (is(name, "getPhysicalHeight")) {
+        r.i = SCREEN_H;
+    } else if (is(name, "getDisplayId") || is(name, "getModeId")) {
+        r.i = 0;
+    } else if (is(name, "getResources")) {
+        r.l = jo_new_object("android/content/res/Resources");
+    } else if (is(name, "getConfiguration")) {
+        jobject c = jo_new_object("android/content/res/Configuration");
+        jo_set_int(c, "orientation", 2);       // landscape
+        jo_set_int(c, "screenLayout", 0x13);   // large, long
+        jo_set_int(c, "uiMode", 0x11);
+        jo_set_int(c, "densityDpi", 220);
+        jo_set_float(c, "fontScale", 1.0f);
+        jo_set_int(c, "screenWidthDp", 698);
+        jo_set_int(c, "screenHeightDp", 395);
+        jo_set_int(c, "smallestScreenWidthDp", 395);
+        jo_set_int(c, "keyboard", 1);
+        jo_set_int(c, "navigation", 2);
+        jo_set_int(c, "touchscreen", 3);
+        jo_set_obj(c, "locale", jo_new_object("java/util/Locale"));
+        r.l = c;
+    } else if (is(name, "getProperty") && argc >= 1) {
+        char *n = jo_jstring_to_utf8((jstring)args[0].l);
+        const char *v = NULL;
+        if (n && strstr(n, "OUTPUT_SAMPLE_RATE")) v = "48000";
+        else if (n && strstr(n, "OUTPUT_FRAMES_PER_BUFFER")) v = "256";
+        free(n);
+        r.l = v ? jstr(v) : NULL;
+    } else if (is(name, "getStreamVolume")) {
+        r.i = 12;
+    } else if (is(name, "getStreamMaxVolume")) {
+        r.i = 15;
+    } else if (is(name, "requestAudioFocus")) {
+        r.i = 1; // AUDIOFOCUS_REQUEST_GRANTED
+    } else if (is(name, "isMusicActive") || is(name, "isBluetoothA2dpOn") || is(name, "isWiredHeadsetOn")) {
+        r.z = JNI_FALSE;
+    } else if (is(name, "getString") && strstr(cls, "Settings")) {
+        char *n = argc >= 2 ? jo_jstring_to_utf8((jstring)args[1].l) : NULL;
+        r.l = (n && is(n, "android_id")) ? jstr("5649544130303031") : NULL;
+        free(n);
+    } else if (is(name, "getInt") && strstr(cls, "Settings")) {
+        r.i = argc >= 3 ? args[2].i : 0; // the default value
+    } else if (is(name, "getFloat") && strstr(cls, "Settings")) {
+        r.f = argc >= 3 ? args[2].f : 1.0f;
+    } else if (is(name, "isScreenOn") || is(name, "isInteractive")) {
+        r.z = JNI_TRUE;
+    } else if (is(name, "getIntent")) {
+        r.l = jo_new_object("android/content/Intent");
+    } else if (is(name, "getStringExtra") || is(name, "getDataString") || is(name, "getAction")) {
+        r.l = NULL;
+    } else if (is(name, "getData") && strstr(sc, "Intent")) {
+        r.l = NULL;
 
     // Device capabilities
     } else if (is(name, "hasSystemFeature")) {

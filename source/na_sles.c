@@ -32,6 +32,24 @@
 #include <SLES/OpenSLES_Android.h>
 #include <mpg123.h>
 
+// Android's extended PCM format (not in every OpenSLES_Android.h)
+#ifndef SL_ANDROID_DATAFORMAT_PCM_EX
+#define SL_ANDROID_DATAFORMAT_PCM_EX ((SLuint32) 0x00000004)
+#define SL_ANDROID_PCM_REPRESENTATION_SIGNED_INT ((SLuint32) 0x00000001)
+#define SL_ANDROID_PCM_REPRESENTATION_UNSIGNED_INT ((SLuint32) 0x00000002)
+#define SL_ANDROID_PCM_REPRESENTATION_FLOAT ((SLuint32) 0x00000003)
+typedef struct SLAndroidDataFormat_PCM_EX_ {
+    SLuint32 formatType;
+    SLuint32 numChannels;
+    SLuint32 sampleRate;
+    SLuint32 bitsPerSample;
+    SLuint32 containerSize;
+    SLuint32 channelMask;
+    SLuint32 endianness;
+    SLuint32 representation;
+} SLAndroidDataFormat_PCM_EX;
+#endif
+
 #include "utils/logger.h"
 
 #define MIX_RATE 48000
@@ -59,6 +77,7 @@ struct ng_obj {
     int is_mp3;
     SLuint32 state;              // SL_PLAYSTATE_*
     int channels, rate;          // source format
+    int is_float;                // 32-bit float PCM (SL_ANDROID_DATAFORMAT_PCM_EX), else 16-bit
     float pos;                   // position in the current buffer, in frames
     uint64_t frames_played;
     float gain_l, gain_r;
@@ -217,7 +236,7 @@ static void mix_player(ng_obj *o, float *acc, int frames, pending_play *pp, int 
         } else {
             if (o->q_count == 0) return;
             src = o->queue[o->q_head];
-            avail = (int)(o->queue_bytes[o->q_head] / (2 * o->channels));
+            avail = (int)(o->queue_bytes[o->q_head] / ((o->is_float ? 4 : 2) * o->channels));
             int idx = (int) o->pos;
             if (idx >= avail) {
                 // buffer done
@@ -232,7 +251,15 @@ static void mix_player(ng_obj *o, float *acc, int frames, pending_play *pp, int 
                 i--;
                 continue;
             }
-            float l = src[idx * o->channels], r = o->channels > 1 ? src[idx * o->channels + 1] : l;
+            float l, r;
+            if (o->is_float) {
+                const float *f = (const float *) src;
+                l = f[idx * o->channels] * 32767.0f;
+                r = o->channels > 1 ? f[idx * o->channels + 1] * 32767.0f : l;
+            } else {
+                l = src[idx * o->channels];
+                r = o->channels > 1 ? src[idx * o->channels + 1] : l;
+            }
             acc[i * 2] += l * o->gain_l;
             acc[i * 2 + 1] += r * o->gain_r;
             float before = o->pos;
@@ -510,6 +537,14 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *player, SLD
             o->rate = fmt->samplesPerSec / 1000;
             if (fmt->bitsPerSample != 16)
                 l_warn("[SOUND] %u-bit PCM isn't supported", (unsigned) fmt->bitsPerSample);
+        } else if (fmt && fmt->formatType == SL_ANDROID_DATAFORMAT_PCM_EX) {
+            // FMOD on newer Android: float or 16-bit PCM
+            SLAndroidDataFormat_PCM_EX *ex = (SLAndroidDataFormat_PCM_EX *) fmt;
+            o->channels = ex->numChannels ? ex->numChannels : 1;
+            o->rate = ex->sampleRate / 1000;
+            o->is_float = ex->representation == SL_ANDROID_PCM_REPRESENTATION_FLOAT;
+            l_info("[SOUND] PCM_EX player: %d ch, %d Hz, %u bit%s", o->channels, o->rate,
+                   (unsigned) ex->bitsPerSample, o->is_float ? " float" : "");
         }
     } else if (loc == SL_DATALOCATOR_ANDROIDFD) {
         SLDataLocator_AndroidFD *fd = (SLDataLocator_AndroidFD *) src->pLocator;

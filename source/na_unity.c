@@ -152,6 +152,16 @@ int na_unity_frame(void) {
     return render(env, player);
 }
 
+void na_unity_inject_event(jobject ev) {
+    static jboolean (*inject)(JNIEnv *, jobject, jobject, jint) = NULL;
+    static int looked_up = 0;
+    if (!looked_up) {
+        looked_up = 1;
+        inject = native_with_args("nativeInjectEvent", "(Landroid/view/InputEvent;I");
+    }
+    if (inject) inject(env, player, ev, 0);
+}
+
 jobject na_unity_player(void) {
     return player;
 }

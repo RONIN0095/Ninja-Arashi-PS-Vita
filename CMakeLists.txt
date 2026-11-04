@@ -98,9 +98,11 @@ endif()
 set(SOURCES
     source/main.c
     source/na_android.c
+    source/na_apk.c
     source/na_dynlib.c
     source/na_egl.c
     source/na_gles3.c
+    source/na_input.c
     source/na_java.c
     source/na_modules.c
     source/na_shaders.c

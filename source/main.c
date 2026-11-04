@@ -20,6 +20,7 @@
 
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/touch.h>
@@ -29,6 +30,7 @@
 
 #include "jni_objects.h"
 #include "na_egl.h"
+#include "na_input.h"
 #include "na_unity.h"
 #include "utils/dialog.h"
 #include "utils/glutil.h"
@@ -105,6 +107,7 @@ int main() {
 
     int frame = 0;
     while (1) {
+        na_input_poll();
         int swaps_before = na_egl_swap_count;
         int r = na_unity_frame();
         if (frame < 5 || frame % 600 == 0)
@@ -112,6 +115,8 @@ int main() {
         // Unity skips the swap while it has nothing to show: keep the display alive
         if (na_egl_swap_count == swaps_before)
             sceKernelDelayThread(1000);
+        if (frame == 0)
+            sceIoRemove(DATA_PATH "sound_probe.txt"); // sound setup went fine (see dynlib.c)
         frame++;
         last_frame_us = sceKernelGetProcessTimeWide();
     }

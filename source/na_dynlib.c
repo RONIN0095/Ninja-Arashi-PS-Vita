@@ -39,6 +39,9 @@
 
 #include <so_util/so_util.h>
 
+#include <SLES/OpenSLES.h>
+#include <SLES/OpenSLES_Android.h>
+
 #include "na_modules.h"
 #include "na_android.h"
 #include "na_egl.h"
@@ -501,7 +504,54 @@ static long long strtoll_l_na(const char *s, char **e, int b, void *l) { return 
 static unsigned long long strtoull_l_na(const char *s, char **e, int b, void *l) { return strtoull(s, e, b); }
 static double wcstold_na(const wchar_t *s, wchar_t **e) { return wcstod(s, e); }
 
-static int unsetenv_na(const char *name) { return 0; }
+/*
+ * Environment. GC_DONT_GC: IL2CPP's Boehm GC stops other threads with
+ * signals for a collection; there are no signals on the Vita, so the first
+ * collection would wait forever. The GC is switched off instead (see
+ * docs/NOTES.md); na_modules.c also turns Unity's il2cpp_gc_* calls into
+ * no-ops.
+ */
+#define MAX_ENV 32
+static char *env_names[MAX_ENV];
+static char *env_values[MAX_ENV];
+static int n_env = 0;
+
+static int env_find(const char *name) {
+    for (int i = 0; i < n_env; i++)
+        if (env_names[i] && strcmp(env_names[i], name) == 0) return i;
+    return -1;
+}
+
+static int setenv_na(const char *name, const char *value, int overwrite) {
+    if (!name || !value) return -1;
+    int i = env_find(name);
+    if (i >= 0) {
+        if (!overwrite) return 0;
+        free(env_values[i]);
+        env_values[i] = strdup(value);
+        return 0;
+    }
+    if (n_env >= MAX_ENV) return -1;
+    env_names[n_env] = strdup(name);
+    env_values[n_env] = strdup(value);
+    n_env++;
+    return 0;
+}
+
+static char *getenv_na(const char *name) {
+    int i = name ? env_find(name) : -1;
+    return i >= 0 ? env_values[i] : NULL;
+}
+
+static int unsetenv_na(const char *name) {
+    int i = env_find(name);
+    if (i >= 0) {
+        free(env_names[i]);
+        free(env_values[i]);
+        env_names[i] = env_values[i] = NULL;
+    }
+    return 0;
+}
 
 /*
  * getauxval: CPU features (Cortex-A9: VFPv3 + NEON, no IDIV, no VFPv4)
@@ -735,6 +785,8 @@ so_default_dynlib na_dynlib[] = {
     { "process_vm_readv", (uintptr_t)&fail_enosys },
     { "ptrace", (uintptr_t)&fail_enosys },
     { "unsetenv", (uintptr_t)&unsetenv_na },
+    { "getenv", (uintptr_t)&getenv_na },
+    { "setenv", (uintptr_t)&setenv_na },
 
     // threads
     { "pthread_getattr_np", (uintptr_t)&pthread_getattr_np_na },
@@ -809,6 +861,10 @@ so_default_dynlib na_dynlib[] = {
     { "if_nametoindex", (uintptr_t)&if_nametoindex_na },
     { "inet_addr", (uintptr_t)&inet_addr_na },
 
+    // OpenSL ES interface ids FMOD asks for (na_sles.c refuses them)
+    { "SL_IID_RECORD", (uintptr_t)&SL_IID_RECORD },
+    { "SL_IID_ANDROIDCONFIGURATION", (uintptr_t)&SL_IID_ANDROIDCONFIGURATION },
+
     // EGL additions
     { "eglSurfaceAttrib", (uintptr_t)&na_eglSurfaceAttrib },
 
@@ -819,6 +875,12 @@ so_default_dynlib na_dynlib[] = {
 const int na_dynlib_count = sizeof(na_dynlib) / sizeof(na_dynlib[0]);
 
 void na_dynlib_init(void) {
+    setenv_na("GC_DONT_GC", "1", 1);
+    setenv_na("HOME", DATA_PATH "files", 1);
+    setenv_na("TMPDIR", DATA_PATH "cache", 1);
+    setenv_na("EXTERNAL_STORAGE", DATA_PATH "external", 1);
+    setenv_na("ANDROID_ROOT", "/system", 1);
+    setenv_na("ANDROID_DATA", "/data", 1);
     for (int i = 0; i < FUTEX_BUCKETS; i++)
         pthread_cond_init(&futex_cond[i], NULL);
     futex_ready = 1;

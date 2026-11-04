@@ -23,4 +23,7 @@ int na_unity_frame(void);
 
 jobject na_unity_player(void);
 
+/** UnityPlayer.nativeInjectEvent(event, 0). */
+void na_unity_inject_event(jobject ev);
+
 #endif // NA_UNITY_H

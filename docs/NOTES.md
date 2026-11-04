@@ -42,7 +42,10 @@ ersten Start zu erwarten ist.
 
 ## Offene Risiken (nach Gewicht)
 
-1. **Garbage Collector und Signale.** IL2CPP nutzt Boehm GC. Für eine
+1. **Garbage Collector und Signale** (vorläufig umgangen: `GC_DONT_GC=1`
+   in der Umgebung, Unitys `il2cpp_gc_enable/collect/...` sind No-ops; der
+   Heap wächst also nur. Das reicht zum Starten, auf Dauer braucht es eine
+   echte Lösung, s. u.). IL2CPP nutzt Boehm GC. Für eine
    Sammlung hält er alle registrierten Threads per Signal an
    (`pthread_kill` + `sigsuspend`). Die Vita hat keine Signale; der Loader
    meldet `pthread_kill` als erfolgreich, aber der Thread hält nicht an.
@@ -75,7 +78,9 @@ ersten Start zu erwarten ist.
 
 ## Noch nicht gemacht
 
-- Eingabe: Plan ist, `CrossPlatformInputManager` (Assembly-CSharp-firstpass)
+- Eingabe: Touch (vorderer Bildschirm) und Tasten gehen als `MotionEvent`/
+  `KeyEvent` an `nativeInjectEvent` (`na_input.c`). Ob das Spiel Gamepad-
+  Tasten auswertet, ist offen; sonst bleibt der Plan, `CrossPlatformInputManager` (Assembly-CSharp-firstpass)
   per Hook zu bedienen. Dafür mit Cpp2IL (Metadaten v31) die Adressen von
   `SetAxis`, `SetButtonDown`, `SetButtonUp` bestimmen. Alternativ Touch über
   `nativeInjectEvent` mit nachgebauten `MotionEvent`-Objekten.

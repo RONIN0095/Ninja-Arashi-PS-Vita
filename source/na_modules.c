@@ -206,6 +206,28 @@ void *na_dlopen(const char *filename, int flags) {
     return NULL;
 }
 
+/*
+ * IL2CPP's garbage collector is off (GC_DONT_GC, see na_dynlib.c). Unity
+ * turns it on and triggers collections through these exports; they become
+ * no-ops so that no collection ever starts.
+ */
+static void gc_noop(void) {}
+static int gc_is_disabled(void) { return 1; }
+static int gc_collect_a_little(void) { return 0; }
+
+static void *intercept(const char *symbol) {
+    if (strncmp(symbol, "il2cpp_gc_", 10) != 0) return NULL;
+    const char *s = symbol + 10;
+    if (!strcmp(s, "enable") || !strcmp(s, "collect") || !strcmp(s, "start_incremental_collection") ||
+        !strcmp(s, "set_mode") || !strcmp(s, "set_max_time_slice_ns")) {
+        l_info("dlsym(%s): no-op (GC is off)", symbol);
+        return (void *)&gc_noop;
+    }
+    if (!strcmp(s, "is_disabled")) return (void *)&gc_is_disabled;
+    if (!strcmp(s, "collect_a_little")) return (void *)&gc_collect_a_little;
+    return NULL;
+}
+
 static void *lookup_global(const char *symbol) {
     void *p = na_dynlib_lookup(symbol);
     if (p) return p;
@@ -220,7 +242,8 @@ static void *lookup_global(const char *symbol) {
 
 void *na_dlsym(void *handle, const char *symbol) {
     if (!symbol) return NULL;
-    void *p = NULL;
+    void *p = intercept(symbol);
+    if (p) return p;
 
     if (handle >= (void *)&na_libs[0] && handle < (void *)&na_libs[NA_LIB_COUNT]) {
         NaLib *lib = (NaLib *)handle;
