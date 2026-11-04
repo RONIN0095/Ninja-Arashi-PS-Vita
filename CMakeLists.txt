@@ -24,7 +24,7 @@ set(PARSECOREPATH "$ENV{PARSECOREPATH}" CACHE STRING "vita-parse-core main.py")
 # Game-specific definitions
 set(DATA_PATH "ux0:data/ninjaarashi/") # Path to data (with trailing /)
 set(PACKAGE_NAME "com.blackpanther.ninjaarashi")
-add_definitions(-DDATA_PATH="${DATA_PATH}" -DPACKAGE_NAME="${PACKAGE_NAME}")
+add_definitions(-DDATA_PATH="${DATA_PATH}" -DGAME_PATH="${DATA_PATH}" -DPACKAGE_NAME="${PACKAGE_NAME}")
 
 # Port type
 option(NDK_PORT "This should be on if the game is done with Android NDK (has an android_main entry point)" OFF)

@@ -49,7 +49,7 @@ AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, int mode) {
 #ifdef USE_SCELIBC_IO
     a->f = sceLibcBridge_fopen((const char *)a->filename, "r");
 #else
-    a->f = fopen((cost char *)a->filename, "r");
+    a->f = fopen((const char *)a->filename, "r");
 #endif
 
     if (!a->f) {
