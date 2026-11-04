@@ -26,6 +26,8 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <wchar.h>
 #include <wctype.h>
 #include <malloc.h>
@@ -274,6 +276,75 @@ static int statfs_na(const char *path, statfs_bionic *st) {
     st->f_files = st->f_ffree = 65536;
     st->f_namelen = 255;
     return 0;
+}
+
+/*
+ * File copying: IL2CPP copies its metadata with sendfile() and may size the
+ * target with ftruncate() first; neither exists in newlib on the Vita.
+ */
+static long sendfile_na(int out_fd, int in_fd, long *offset, size_t count) {
+    static char buf[64 * 1024];
+    off_t saved = 0;
+    if (offset) {
+        saved = lseek(in_fd, 0, SEEK_CUR);
+        lseek(in_fd, *offset, SEEK_SET);
+    }
+    size_t done = 0;
+    while (done < count) {
+        size_t n = count - done < sizeof(buf) ? count - done : sizeof(buf);
+        int r = read(in_fd, buf, n);
+        if (r <= 0) break;
+        int w = write(out_fd, buf, r);
+        if (w != r) {
+            if (done == 0) {
+                errno = EIO;
+                return -1;
+            }
+            break;
+        }
+        done += r;
+    }
+    if (offset) {
+        *offset += done;
+        lseek(in_fd, saved, SEEK_SET);
+    }
+    static int logged = 0;
+    if (logged++ < 16) l_info("sendfile(%d -> %d, %u bytes): %u", in_fd, out_fd, (unsigned)count, (unsigned)done);
+    return (long)done;
+}
+
+static int ftruncate_na(int fd, long len) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) return -1;
+    if (len == st.st_size) return 0;
+    if (len > st.st_size) {
+        // grow: append zeros
+        static char zeros[16 * 1024];
+        off_t pos = lseek(fd, 0, SEEK_CUR);
+        lseek(fd, 0, SEEK_END);
+        long left = len - st.st_size;
+        while (left > 0) {
+            int n = left < (long)sizeof(zeros) ? (int)left : (int)sizeof(zeros);
+            if (write(fd, zeros, n) != n) {
+                lseek(fd, pos, SEEK_SET);
+                errno = ENOSPC;
+                return -1;
+            }
+            left -= n;
+        }
+        lseek(fd, pos, SEEK_SET);
+        return 0;
+    }
+    l_warn("ftruncate(%d, %ld): shrinking from %ld is not supported, ignored", fd, len, (long)st.st_size);
+    return 0;
+}
+
+static int truncate_na(const char *path, long len) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    int r = ftruncate_na(fd, len);
+    close(fd);
+    return r;
 }
 
 static int readlink_na(const char *path, char *buf, size_t sz) {
@@ -874,7 +945,9 @@ so_default_dynlib na_dynlib[] = {
     { "flock", (uintptr_t)&ret0 },
     { "futimens", (uintptr_t)&ret0 },
     { "utimes", (uintptr_t)&ret0 },
-    { "sendfile", (uintptr_t)&fail_enosys },
+    { "sendfile", (uintptr_t)&sendfile_na },
+    { "ftruncate", (uintptr_t)&ftruncate_na },
+    { "truncate", (uintptr_t)&truncate_na },
     { "dup2", (uintptr_t)&fail_enosys },
     { "isatty", (uintptr_t)&isatty_na },
     { "fnmatch", (uintptr_t)&fnmatch_na },
