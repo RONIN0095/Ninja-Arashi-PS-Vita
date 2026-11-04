@@ -43,13 +43,20 @@ static int recent_next = 0, recent_count = 0;
 
 static const char *level_names[] = { "debug", "info", "warn", "ERROR", "FATAL", "ok", "wait" };
 
-// Appends a line and closes the file right away, so the log survives a hang or crash.
+// The file stays open: opening it per line took up to half a second on a
+// memory card. Each line is written with sceIoWrite right away, so it
+// survives a crash (the kernel closes the file).
+static SceUID log_fd = -1;
+static int log_lines = 0;
+#define LOG_MAX_LINES 20000
+
 static void log_to_file(int t, const char *fmt, va_list list) {
-    static int truncated = 0;
-    int flags = SCE_O_WRONLY | SCE_O_CREAT | (truncated ? SCE_O_APPEND : SCE_O_TRUNC);
-    SceUID fd = sceIoOpen(LOG_FILE, flags, 0777);
-    if (fd < 0) return;
-    truncated = 1;
+    if (log_fd < 0) {
+        log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+        if (log_fd < 0) return;
+    }
+    SceUID fd = log_fd;
+    if (++log_lines > LOG_MAX_LINES && t != LT_ERROR && t != LT_FATAL) return;
 
     unsigned int ms = (unsigned int)(sceKernelGetProcessTimeWide() / 1000);
     int n = sceClibSnprintf(buffer_c, sizeof(buffer_c), "%6u.%03u [%s] ", ms / 1000, ms % 1000, level_names[t]);
@@ -57,7 +64,6 @@ static void log_to_file(int t, const char *fmt, va_list list) {
     if (n > (int)sizeof(buffer_c) - 2) n = sizeof(buffer_c) - 2;
     buffer_c[n++] = '\n';
     sceIoWrite(fd, buffer_c, n);
-    sceIoClose(fd);
 
     // Keep the last lines for the on-screen hang report
     buffer_c[n - 1] = '\0';
@@ -142,9 +148,8 @@ int log_raw_printf(const char *fmt, ...) {
     int n = sceClibVsnprintf(buf, sizeof(buf), fmt, list);
     va_end(list);
     if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
-    SceUID fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
-    if (fd < 0) return 0;
-    sceIoWrite(fd, buf, n);
-    sceIoClose(fd);
+    if (log_fd < 0) log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+    if (log_fd < 0) return 0;
+    sceIoWrite(log_fd, buf, n);
     return n;
 }

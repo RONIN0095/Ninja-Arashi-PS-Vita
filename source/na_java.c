@@ -443,6 +443,23 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
                                           is(name, "canWrite") || is(name, "canRead"))) {
         r.z = JNI_TRUE;
 
+    // Free space: Unity checks it before copying its data (File.getUsableSpace, StatFs)
+    } else if (is(name, "getUsableSpace") || is(name, "getFreeSpace") || is(name, "getAvailableBytes") ||
+               is(name, "getFreeBytes")) {
+        r.j = 2LL * 1024 * 1024 * 1024;
+    } else if (is(name, "getTotalSpace") || is(name, "getTotalBytes")) {
+        r.j = 4LL * 1024 * 1024 * 1024;
+    } else if (is(name, "getBlockSizeLong") || is(name, "getBlockSize")) {
+        if (sig[strlen(sig) - 1] == 'J') r.j = 4096; else r.i = 4096;
+    } else if (is(name, "getAvailableBlocksLong") || is(name, "getFreeBlocksLong") || is(name, "getAvailableBlocks") ||
+               is(name, "getFreeBlocks")) {
+        if (sig[strlen(sig) - 1] == 'J') r.j = 524288; else r.i = 524288;
+    } else if (is(name, "getBlockCountLong") || is(name, "getBlockCount")) {
+        if (sig[strlen(sig) - 1] == 'J') r.j = 1048576; else r.i = 1048576;
+    } else if (is(name, "getDataDirectory") || is(name, "getExternalStorageDirectory") ||
+               is(name, "getDownloadCacheDirectory") || is(name, "getRootDirectory")) {
+        r.l = file_object(DATA_PATH "files");
+
     // PackageManager
     } else if (is(name, "getPackageManager")) {
         r.l = jo_new_object("android/content/pm/PackageManager");
@@ -705,6 +722,7 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         r = default_return(sig);
     } else if (is(name, "kill")) {
         l_error("[JAVA] %s.kill(): Unity is shutting down (see the dialog text above)", cls);
+        sceKernelExitProcess(0);
     } else if (is(name, "getClassLoader")) {
         r.l = jo_new_object("java/lang/ClassLoader");
     } else if ((is(name, "loadClass") || is(name, "forName")) && argc >= 1) {

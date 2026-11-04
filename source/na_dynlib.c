@@ -433,14 +433,19 @@ typedef struct {
 } sigaction_bionic;
 
 static sigaction_bionic sig_actions[NSIG_BIONIC];
-static int abort_handler_on = 0;
+static volatile int abort_handler_on = 0;
 static KuKernelAbortHandler old_abort_handler = NULL;
 
 // siginfo_t (128 bytes on bionic): signo, errno, code, then si_addr
 static uint32_t fault_siginfo[32];
 
+// A handler that returns (Unity's crash reporter) cannot fix the fault:
+// stop delivering and crash for real, which leaves a core dump.
 static void handler_returned(void) {
-    l_fatal("Signal handler returned after a fault; giving up.");
+    kuKernelReleaseAbortHandler();
+    abort_handler_on = 0;
+    memset(sig_actions, 0, sizeof(sig_actions));
+    l_fatal("Crash (the game's signal handler returned); core dump follows.");
     *(volatile int *)0 = 0;
 }
 
