@@ -36,7 +36,11 @@ static int io_logged = 0;
 #define l_io(...) do { if (io_logged < 400) { io_logged++; l_info(__VA_ARGS__); } } while (0)
 
 
+#include "na_apk.h"
+#define MAP_PATH(p) char mapped_##p[512]; p = na_apk_map_path(p, mapped_##p, sizeof(mapped_##p))
+
 FILE * fopen_soloader(const char * filename, const char * mode) {
+    MAP_PATH(filename);
     // Three cores for applications at 444 MHz
     if (strcmp(filename, "/sys/devices/system/cpu/present") == 0 ||
         strcmp(filename, "/sys/devices/system/cpu/possible") == 0) {
@@ -64,6 +68,7 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
 }
 
 int open_soloader(const char * path, int oflag, ...) {
+    MAP_PATH(path);
     if (strcmp(path, "/sys/devices/system/cpu/present") == 0 ||
         strcmp(path, "/sys/devices/system/cpu/possible") == 0) {
         return open_soloader("app0:/cpu_present", oflag);
@@ -107,6 +112,7 @@ int fstat_soloader(int fd, stat64_bionic * buf) {
 }
 
 int stat_soloader(const char * path, stat64_bionic * buf) {
+    MAP_PATH(path);
     if (strcmp(path, "/system/lib/libOpenSLES.so") == 0) {
         l_debug("stat(%s): returning 0 in case this is a check for OpenSLES support", path);
         return 0;
@@ -140,7 +146,9 @@ int close_soloader(int fd) {
 }
 
 DIR* opendir_soloader(char* _pathname) {
-    DIR* ret = opendir(_pathname);
+    const char *path = _pathname;
+    MAP_PATH(path);
+    DIR* ret = opendir(path);
     l_debug("opendir(\"%s\"): %p", _pathname, ret);
     return ret;
 }
@@ -199,4 +207,12 @@ int fsync_soloader(int fd) {
     int ret = fsync(fd);
     l_debug("fsync(%i): %i", fd, ret);
     return ret;
+}
+
+int access_soloader(const char *path, int mode) {
+    MAP_PATH(path);
+    struct stat st;
+    int r = stat(path, &st);
+    l_io("access(%s): %i", path, r);
+    return r;
 }

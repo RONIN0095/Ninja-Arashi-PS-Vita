@@ -26,6 +26,7 @@
 #include <psp2/touch.h>
 
 #include <vitaGL.h>
+#include <kubridge.h>
 #include <falso_jni/FalsoJNI.h>
 
 #include "jni_objects.h"
@@ -69,6 +70,7 @@ static int watchdog_thread(SceSize args, void *argp) {
         if (last && now - last > 30ULL * 1000 * 1000) {
             l_fatal("Watchdog: no progress for 30 s, crashing on purpose for a core dump.");
             sceKernelDelayThread(200 * 1000);
+            kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
             *(volatile int *)0 = 0;
         }
     }

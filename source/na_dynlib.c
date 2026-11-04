@@ -49,6 +49,7 @@
 #include "utils/utils.h"
 #include "reimpl/errno.h"
 #include "reimpl/pthr.h"
+#include "reimpl/io.h"
 #include "reimpl/sys.h"
 
 /*
@@ -410,14 +411,110 @@ static int sigfillset_na(sigset_bionic *s) { *s = ~0UL; return 0; }
 static int sigaddset_na(sigset_bionic *s, int n) { if (n > 0 && n <= 32) *s |= 1UL << (n - 1); return 0; }
 static int sigdelset_na(sigset_bionic *s, int n) { if (n > 0 && n <= 32) *s &= ~(1UL << (n - 1)); return 0; }
 
-static int sigaction_na(int sig, const void *act, void *old) {
-    l_debug("sigaction(%d): ignored", sig);
-    if (old) memset(old, 0, 16);
+/*
+ * Fault signals. Handlers are recorded; SIGSEGV/SIGBUS handlers really get
+ * called: kubridge passes data/prefetch aborts to kuKernelRegisterAbortHandler,
+ * and the faulting thread is sent into the handler, like on Linux. IL2CPP's
+ * Boehm GC needs this: GC_find_limit reads memory until it faults and
+ * longjmps out of its SIGSEGV handler. Other signals are only recorded.
+ */
+#include <kubridge.h>
+
+#define BIONIC_SIGBUS 7
+#define BIONIC_SIGSEGV 11
+#define BIONIC_SA_SIGINFO 4
+#define NSIG_BIONIC 65
+
+typedef struct {
+    void *handler;
+    uint32_t mask;
+    int flags;
+    void *restorer;
+} sigaction_bionic;
+
+static sigaction_bionic sig_actions[NSIG_BIONIC];
+static int abort_handler_on = 0;
+static KuKernelAbortHandler old_abort_handler = NULL;
+
+// siginfo_t (128 bytes on bionic): signo, errno, code, then si_addr
+static uint32_t fault_siginfo[32];
+
+static void handler_returned(void) {
+    l_fatal("Signal handler returned after a fault; giving up.");
+    *(volatile int *)0 = 0;
+}
+
+static void abort_handler(KuKernelAbortContext *ctx) {
+    int sig = BIONIC_SIGSEGV;
+    void *h = sig_actions[sig].handler;
+    if ((uintptr_t)h <= 1) {
+        sig = BIONIC_SIGBUS;
+        h = sig_actions[sig].handler;
+    }
+    if ((uintptr_t)h <= 1) {
+        // Nobody handles it: let the fault happen again without us (core dump)
+        kuKernelReleaseAbortHandler();
+        abort_handler_on = 0;
+        return;
+    }
+    memset(fault_siginfo, 0, sizeof(fault_siginfo));
+    fault_siginfo[0] = sig;
+    fault_siginfo[2] = 1; // SEGV_MAPERR
+    fault_siginfo[3] = ctx->FAR;
+    ctx->r0 = sig;
+    ctx->r1 = (uint32_t)(uintptr_t)fault_siginfo;
+    ctx->r2 = 0;
+    ctx->lr = (uint32_t)(uintptr_t)&handler_returned;
+    ctx->sp = (ctx->sp - 64) & ~7u;
+    uint32_t pc = (uint32_t)(uintptr_t)h;
+    if (pc & 1) {
+        ctx->SPSR |= 0x20; // Thumb
+        pc &= ~1u;
+    } else {
+        ctx->SPSR &= ~0x20u;
+    }
+    ctx->SPSR &= ~0x0600FC00u; // clear IT state bits
+    ctx->pc = pc;
+}
+
+static void update_abort_handler(void) {
+    int want = (uintptr_t)sig_actions[BIONIC_SIGSEGV].handler > 1 ||
+               (uintptr_t)sig_actions[BIONIC_SIGBUS].handler > 1;
+    if (want && !abort_handler_on) {
+        int r = kuKernelRegisterAbortHandler(abort_handler, &old_abort_handler);
+        if (r < 0) {
+            static int warned = 0;
+            if (!warned++) l_error("kuKernelRegisterAbortHandler: 0x%x (kubridge too old? Need v0.3+)", r);
+            return;
+        }
+        abort_handler_on = 1;
+    } else if (!want && abort_handler_on) {
+        kuKernelReleaseAbortHandler();
+        abort_handler_on = 0;
+    }
+}
+
+static int sigaction_na(int sig, const sigaction_bionic *act, sigaction_bionic *old) {
+    if (sig <= 0 || sig >= NSIG_BIONIC) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (old) *old = sig_actions[sig];
+    if (act) {
+        sig_actions[sig] = *act;
+        l_debug("sigaction(%d, handler %p, flags 0x%x)", sig, act->handler, act->flags);
+        if (sig == BIONIC_SIGSEGV || sig == BIONIC_SIGBUS) update_abort_handler();
+    }
     return 0;
 }
 
 static void *signal_na(int sig, void *handler) {
-    return NULL; // SIG_DFL
+    if (sig <= 0 || sig >= NSIG_BIONIC) return (void *)-1;
+    void *old = sig_actions[sig].handler;
+    sig_actions[sig].handler = handler;
+    sig_actions[sig].flags = 0;
+    if (sig == BIONIC_SIGSEGV || sig == BIONIC_SIGBUS) update_abort_handler();
+    return old;
 }
 
 static int sigsuspend_na(const sigset_bionic *mask) {
@@ -757,7 +854,9 @@ so_default_dynlib na_dynlib[] = {
     { "syscall", (uintptr_t)&syscall_na },
     { "sysconf", (uintptr_t)&sysconf_na },
 
-    // files
+    // files (paths inside the APK are mapped, see na_apk.c)
+    { "access", (uintptr_t)&access_soloader },
+    { "lstat", (uintptr_t)&stat_soloader },
     { "lseek64", (uintptr_t)&lseek64_na },
     { "statfs", (uintptr_t)&statfs_na },
     { "readlink", (uintptr_t)&readlink_na },

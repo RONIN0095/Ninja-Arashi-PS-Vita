@@ -21,4 +21,11 @@ int na_apk_exists(const char *name);
 /** Reads a file from the APK into a malloc'd, NUL-terminated buffer, or NULL. */
 void *na_apk_read(const char *name, size_t *size);
 
+/**
+ * Paths inside the APK ("<DATA_PATH>base.apk/assets/...") map to
+ * DATA_PATH "assets/..." (extracted on first use). Other paths are returned
+ * unchanged. buf receives the mapped path.
+ */
+const char *na_apk_map_path(const char *path, char *buf, size_t buflen);
+
 #endif // NA_APK_H
