@@ -33,6 +33,7 @@
 
 static void glBindFramebuffer_na(GLenum target, GLuint fb); // with the screenshot code at the end
 static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h);
+static int blend_on = 0; // GL_BLEND, for the draw trace
 static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h);
 #include "utils/logger.h"
 
@@ -931,8 +932,14 @@ static void glBlitFramebuffer_na(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLi
  * or stencil test against stale values. Ninja Arashi is 2D: Unity orders
  * its sprites and UI itself, so neither test is needed to draw it.
  */
+static void glDisable_na(GLenum cap) {
+    if (cap == GL_BLEND) blend_on = 0;
+    glDisable(cap);
+}
+
 static void glEnable_na(GLenum cap) {
-    if (cap == GL_DEPTH_TEST || cap == GL_STENCIL_TEST) {
+    if (cap == GL_BLEND) blend_on = 1;
+    if (cap == GL_DEPTH_TEST) { // stencil stays: UI masks need it (run 36: no change without either)
         glDisable(cap);
         return;
     }
@@ -1006,8 +1013,20 @@ extern volatile int na_egl_swap_count; // na_egl.c
 
 static GLuint cur_program = 0;
 static int draw_no = 0, draws_traced = 0, bad_draws = 0;
-#define TRACE_FROM_SWAP 3   // the game scene starts after the third swap
-#define TRACED_DRAWS 150
+static uint32_t first_vertex = 0;
+static GLenum blend_f[4] = { GL_ONE, GL_ZERO, GL_ONE, GL_ZERO };
+
+static void glBlendFunc_na(GLenum s, GLenum d) {
+    blend_f[0] = blend_f[2] = s; blend_f[1] = blend_f[3] = d;
+    glBlendFunc(s, d);
+}
+
+static void glBlendFuncSeparate_na(GLenum sr, GLenum dr, GLenum sa, GLenum da) {
+    blend_f[0] = sr; blend_f[1] = dr; blend_f[2] = sa; blend_f[3] = da;
+    glBlendFuncSeparate(sr, dr, sa, da);
+}
+#define TRACE_FROM_SWAP 1500 // the menu is up by then (about 50 s in)
+#define TRACED_DRAWS 120
 
 static void glUseProgram_na(GLuint p) {
     cur_program = p;
@@ -1156,8 +1175,11 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
             }
         }
         last = max_index(src, count, type) + base;
+        first_vertex = (type == GL_UNSIGNED_SHORT ? ((const uint16_t *)src)[0] :
+                        type == GL_UNSIGNED_INT ? ((const uint32_t *)src)[0] : ((const uint8_t *)src)[0]) + base;
     } else {
         last = first + count - 1;
+        first_vertex = first;
     }
     snprintf(desc, desc_size, "count %d, last vertex %u", count, last);
 
@@ -1196,8 +1218,19 @@ static int trace_this_draw(void) {
 
 static void traced(const char *what, const char *desc) {
     draws_traced++;
-    l_info("[GL] draw %d: %s prog %u, %s, vao attribs 0x%x", draw_no, what, cur_program, desc,
-           cur_vao->vertex_attrib_state);
+    // colour of the first vertex (attribute 1 is COLOR0 in Unity's bindings)
+    char col[48] = "no color";
+    if (cur_vao->vertex_attrib_state & 2) {
+        vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[1];
+        uint32_t off = cur_vao->vertex_attrib_offsets[1] + first_vertex * cur_vao->vertex_stream_config[1].stride;
+        if (vb && vb->ptr && off + 4 <= (uint32_t)vb->size) {
+            const uint8_t *c = (const uint8_t *)vb->ptr + off;
+            snprintf(col, sizeof(col), "color %u/%u/%u/%u (fmt %u)", c[0], c[1], c[2], c[3],
+                     cur_vao->vertex_attrib_config[1].format);
+        }
+    }
+    l_info("[GL] draw %d: %s prog %u, %s, %s, blend %s 0x%x/0x%x 0x%x/0x%x", draw_no, what, cur_program, desc, col,
+           blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3]);
 }
 
 static void traced_done(void) {
@@ -1328,7 +1361,7 @@ static const gl_entry gl_table[] = {
     E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
     E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
     { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
-    E(glEnable), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glEnable), E(glDisable), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
