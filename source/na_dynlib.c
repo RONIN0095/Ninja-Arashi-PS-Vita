@@ -581,20 +581,81 @@ static sigaction_bionic sig_actions[NSIG_BIONIC];
 static volatile int abort_handler_on = 0;
 static KuKernelAbortHandler old_abort_handler = NULL;
 
-// siginfo_t (128 bytes on bionic): signo, errno, code, then si_addr
-static uint32_t fault_siginfo[32];
 
-// A handler that returns (Unity's crash reporter) cannot fix the fault:
-// stop delivering and crash for real, which leaves a core dump.
-static void handler_returned(void) {
-    kuKernelReleaseAbortHandler();
-    abort_handler_on = 0;
-    memset(sig_actions, 0, sizeof(sig_actions));
-    l_fatal("Crash (the game's signal handler returned); core dump follows.");
-    *(volatile int *)0 = 0;
+
+/*
+ * Signal frames. The handler gets (sig, siginfo, ucontext) like on Linux;
+ * when it returns, na_sigreturn restores the registers from the ucontext,
+ * which the handler may have changed (IL2CPP turns faults into managed
+ * NullReferenceExceptions that way). If it changed nothing, the fault is
+ * not handled: delivery is switched off and the faulting instruction runs
+ * again, so the crash happens for real and the core dump shows its place.
+ *
+ * bionic ARM ucontext: uc_flags, uc_link, uc_stack (12 bytes), then
+ * uc_mcontext = sigcontext { trap_no, error_code, oldmask, r0..r10, fp, ip,
+ * sp, lr, pc, cpsr, fault_address } at offset 20.
+ */
+#define UC_R0 8      // word index of arm_r0 in the ucontext
+#define UC_SP (UC_R0 + 13)
+#define UC_LR (UC_R0 + 14)
+#define UC_PC (UC_R0 + 15)
+#define UC_CPSR (UC_R0 + 16)
+#define UC_FAULT (UC_R0 + 17)
+#define UC_WORDS 192 // 768 bytes: room for uc_sigmask/uc_regspace
+#define UC_ORIG_PC (UC_WORDS - 1)
+#define N_FRAMES 8
+
+typedef struct {
+    uint32_t uc[UC_WORDS];
+    uint32_t info[32];
+} sig_frame;
+
+static sig_frame frames[N_FRAMES];
+static volatile int next_frame = 0;
+static volatile uint32_t last_fault_pc, last_fault_addr;
+
+// Called by na_sigreturn with the frame (r4 still holds it after the handler)
+uint32_t *na_sig_after(sig_frame *f) {
+    uint32_t *uc = f->uc;
+    if (uc[UC_PC] == uc[UC_ORIG_PC]) {
+        // not handled: crash for real at the original instruction
+        kuKernelReleaseAbortHandler();
+        abort_handler_on = 0;
+        memset(sig_actions, 0, sizeof(sig_actions));
+        l_fatal("Unhandled fault at pc 0x%08x (address 0x%08x); core dump follows.", uc[UC_PC], uc[UC_FAULT]);
+    }
+    return uc;
 }
 
-static volatile uint32_t last_fault_pc, last_fault_addr;
+// r0 = ucontext: restore r0-r12, sp, lr, pc, flags and continue there
+__attribute__((naked, target("arm"))) void na_sig_restore(uint32_t *uc) {
+    __asm__ volatile (
+        "ldr lr, [r0, #88]\n"     // lr  (word 22)
+        "ldr r1, [r0, #84]\n"     // sp  (word 21)
+        "ldr r2, [r0, #92]\n"     // pc  (word 23)
+        "ldr r3, [r0, #96]\n"     // cpsr (word 24)
+        "tst r3, #0x20\n"
+        "orrne r2, r2, #1\n"      // Thumb target
+        "sub r1, r1, #8\n"
+        "str r2, [r1, #4]\n"
+        "ldr r2, [r0, #32]\n"     // r0 (word 8)
+        "str r2, [r1]\n"
+        "msr APSR_nzcvq, r3\n"
+        "mov sp, r1\n"
+        "add r0, r0, #36\n"       // r1.. (word 9)
+        "ldm r0, {r1-r12}\n"
+        "pop {r0, pc}\n"
+    );
+}
+
+// The handler returns here; r4 = frame (callee-saved, set when redirecting)
+__attribute__((naked, target("arm"))) void na_sigreturn(void) {
+    __asm__ volatile (
+        "mov r0, r4\n"
+        "bl na_sig_after\n"
+        "b na_sig_restore\n"
+    );
+}
 
 static void abort_handler(KuKernelAbortContext *ctx) {
     int sig = BIONIC_SIGSEGV;
@@ -603,9 +664,9 @@ static void abort_handler(KuKernelAbortContext *ctx) {
         sig = BIONIC_SIGBUS;
         h = sig_actions[sig].handler;
     }
-    // Only IL2CPP's Boehm GC handles faults on purpose (GC_find_limit).
-    // Unity's crash reporter would only hide where the crash happened, so
-    // any other fault is left to the system: real crash, useful core dump.
+    // Only handlers inside libil2cpp get faults (Boehm's GC_find_limit,
+    // IL2CPP's NullReferenceException). Unity's crash reporter would only
+    // hide where the crash happened.
     NaLib *owner = na_module_for_addr((uintptr_t)h & ~1u);
     if ((uintptr_t)h <= 1 || !owner || owner != &na_libs[NA_LIB_IL2CPP]) {
         last_fault_pc = ctx->pc;
@@ -614,15 +675,26 @@ static void abort_handler(KuKernelAbortContext *ctx) {
         abort_handler_on = 0;
         return;
     }
-    memset(fault_siginfo, 0, sizeof(fault_siginfo));
-    fault_siginfo[0] = sig;
-    fault_siginfo[2] = 1; // SEGV_MAPERR
-    fault_siginfo[3] = ctx->FAR;
+
+    sig_frame *f = &frames[__sync_fetch_and_add(&next_frame, 1) % N_FRAMES];
+    memset(f, 0, sizeof(*f));
+    uint32_t *uc = f->uc;
+    const uint32_t *regs = &ctx->r0;
+    for (int i = 0; i < 16; i++) uc[UC_R0 + i] = regs[i]; // r0..r12, sp, lr, pc
+    uc[UC_CPSR] = ctx->SPSR;
+    uc[UC_FAULT] = ctx->FAR;
+    uc[UC_ORIG_PC] = ctx->pc;
+    uc[UC_R0 - 3] = 14; // trap_no: data abort
+    f->info[0] = sig;
+    f->info[2] = 1; // SEGV_MAPERR
+    f->info[3] = ctx->FAR;
+
     ctx->r0 = sig;
-    ctx->r1 = (uint32_t)(uintptr_t)fault_siginfo;
-    ctx->r2 = 0;
-    ctx->lr = (uint32_t)(uintptr_t)&handler_returned;
-    ctx->sp = (ctx->sp - 64) & ~7u;
+    ctx->r1 = (uint32_t)(uintptr_t)f->info;
+    ctx->r2 = (uint32_t)(uintptr_t)uc;
+    ctx->r4 = (uint32_t)(uintptr_t)f;
+    ctx->lr = (uint32_t)(uintptr_t)&na_sigreturn;
+    ctx->sp = (ctx->sp - 128) & ~7u;
     uint32_t pc = (uint32_t)(uintptr_t)h;
     if (pc & 1) {
         ctx->SPSR |= 0x20; // Thumb
