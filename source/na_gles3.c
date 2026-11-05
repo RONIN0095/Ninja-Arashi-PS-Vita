@@ -392,12 +392,14 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
             if (lw < 1) lw = 1;
             if (lh < 1) lh = 1;
             glTexImage2D(t, l, format, lw, lh, 0, format, type, NULL);
+            break; // mipmaps are off (see "Mipmaps" below)
         }
     }
 }
 
 static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
                                          GLenum format, GLsizei size, const void *data) {
+    if (level > 0) return; // mipmaps are off
     tex_storage *s = storage_for(bound_texture(target), 0);
     GLsizei lw = s ? s->w >> level : w, lh = s ? s->h >> level : h;
     if (lw < 1) lw = 1;
@@ -478,6 +480,78 @@ static void glClearBufferfi_na(GLenum buffer, GLint drawbuffer, GLfloat depth, G
 
 static void glDrawBuffers_na(GLsizei n, const GLenum *bufs) {}
 static void glInvalidateFramebuffer_na(GLenum target, GLsizei n, const GLenum *attachments) {}
+
+/*
+ * Mipmaps
+ *
+ * vitaGL's mip chains for runtime-recompressed (ETC2 -> DXT5, padded to a
+ * power of two) and immutable-storage textures don't match what it tells
+ * the GPU when a sampler asks for mipmaps, and the GPU then reads past the
+ * texture: a GPU crash on the first frame of the game scene. A 2D game
+ * loses next to nothing without them, so only level 0 is kept and the
+ * mipmapped minification filters become their base filter.
+ */
+static GLint base_filter(GLint f) {
+    switch (f) {
+        case 0x2700: case 0x2702: return GL_NEAREST; // NEAREST_MIPMAP_NEAREST/LINEAR
+        case 0x2701: case 0x2703: return GL_LINEAR;  // LINEAR_MIPMAP_NEAREST/LINEAR
+        default: return f;
+    }
+}
+
+static void glTexParameteri_na(GLenum target, GLenum pname, GLint v) {
+    if (pname == GL_TEXTURE_MIN_FILTER) v = base_filter(v);
+    if (pname == 0x813C || pname == 0x813D || pname == 0x813A || pname == 0x813B) return; // BASE/MAX_LEVEL, MIN/MAX_LOD
+    glTexParameteri(target, pname, v);
+}
+
+static void glTexParameterf_na(GLenum target, GLenum pname, GLfloat v) {
+    if (pname == GL_TEXTURE_MIN_FILTER) {
+        glTexParameteri_na(target, pname, (GLint)v);
+        return;
+    }
+    if (pname == 0x813C || pname == 0x813D || pname == 0x813A || pname == 0x813B) return;
+    glTexParameterf(target, pname, v);
+}
+
+static void glTexParameteriv_na(GLenum target, GLenum pname, const GLint *v) {
+    glTexParameteri_na(target, pname, v[0]);
+}
+
+static void glSamplerParameteri_na(GLuint smp, GLenum pname, GLint v) {
+    if (pname == GL_TEXTURE_MIN_FILTER) v = base_filter(v);
+    if (pname == 0x813A || pname == 0x813B) return; // MIN/MAX_LOD
+    glSamplerParameteri(smp, pname, v);
+}
+
+static void glSamplerParameterf_na(GLuint smp, GLenum pname, GLfloat v) {
+    if (pname == GL_TEXTURE_MIN_FILTER) {
+        glSamplerParameteri_na(smp, pname, (GLint)v);
+        return;
+    }
+    if (pname == 0x813A || pname == 0x813B) return;
+    glSamplerParameterf(smp, pname, v);
+}
+
+static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
+                            GLenum type, const void *data) {
+    if (level > 0) return;
+    glTexImage2D(target, level, ifmt, w, h, border, format, type, data);
+}
+
+static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
+                               GLenum type, const void *data) {
+    if (level > 0) return;
+    glTexSubImage2D(target, level, x, y, w, h, format, type, data);
+}
+
+static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
+                                      GLsizei size, const void *data) {
+    if (level > 0) return;
+    glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
+}
+
+static void glGenerateMipmap_na(GLenum target) {}
 
 /*
  * Render targets
@@ -730,7 +804,11 @@ static const gl_entry gl_table[] = {
     E(glGetRenderbufferParameteriv), E(glBindRenderbuffer), E(glRenderbufferStorage),
     E(glFramebufferRenderbuffer), E(glDeleteRenderbuffers), E(glFramebufferTexture2D), E(glFramebufferTexture),
     { "glFramebufferTextureEXT", (void *)&glFramebufferTexture_na }, { "glFramebufferTextureOES", (void *)&glFramebufferTexture_na },
-    E(glCheckFramebufferStatus), E(glBlitFramebuffer), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glCheckFramebufferStatus), E(glBlitFramebuffer),
+    E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
+    E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
+    { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
+    E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
