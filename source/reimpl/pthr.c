@@ -264,21 +264,29 @@ int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr
     if (!attr) {
         pthread_attr_t a;
         pthread_attr_init(&a);
-        pthread_attr_setstacksize(&a, 512 * 1024);
+        pthread_attr_setstacksize(&a, 256 * 1024);
         ret = pthread_create(thread, &a, start, param);
         pthread_attr_destroy(&a);
     } else{
         _attr_t_static_init((pthread_attr_t_bionic *) attr);
-        // Keep the requested size, but never less than 512 KB
-        size_t ss = 0;
+        // 256 KB .. 1 MB: Unity starts ~20 threads, and every stack is real
+        // memory on the Vita (no lazily committed pages)
+        size_t ss = 0, want;
         pthread_attr_getstacksize(attr->real_ptr, &ss);
-        if (ss < 512 * 1024)
-            pthread_attr_setstacksize(attr->real_ptr, 512 * 1024);
+        want = ss < 256 * 1024 ? 256 * 1024 : (ss > 1024 * 1024 ? 1024 * 1024 : ss);
+        pthread_attr_setstacksize(attr->real_ptr, want);
         ret = pthread_create(thread, attr->real_ptr, start, param);
+        if (ret != 0 && want > 256 * 1024) {
+            // out of memory: retry with the minimum
+            pthread_attr_setstacksize(attr->real_ptr, 256 * 1024);
+            ret = pthread_create(thread, attr->real_ptr, start, param);
+        }
+        l_info("pthread_create(start: %p, stack %u KB requested, %u KB used): %i", start_game,
+               (unsigned)(ss / 1024), (unsigned)(want / 1024), ret);
     }
 
     if (ret != 0) free(tr);
-    l_info("pthread_create(start: %p, param: %p): %i", start_game, param_game, ret);
+    if (!attr) l_info("pthread_create(start: %p, param: %p): %i", start_game, param_game, ret);
     return ret;
 }
 

@@ -515,6 +515,27 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         snprintf(path, sizeof(path), "assets/%s", n ? n : "");
         size_t size = 0;
         void *data = na_apk_read(path, &size);
+        if (data && strcmp(path, "assets/bin/Data/boot.config") == 0) {
+            // Fewer job threads (each one costs real memory here) and smaller
+            // allocator blocks
+            static const char extra[] =
+                "\njob-worker-count=2\n"
+                "background-job-worker-count=1\n"
+                "enlighten-job-worker-count=1\n"
+                "memorysetup-main-allocator-block-size=4194304\n"
+                "memorysetup-thread-allocator-block-size=2097152\n"
+                "memorysetup-gfx-main-allocator-block-size=2097152\n"
+                "memorysetup-gfx-thread-allocator-block-size=2097152\n"
+                "memorysetup-cache-allocator-block-size=1048576\n"
+                "memorysetup-typetree-allocator-block-size=1048576\n";
+            char *grown = realloc(data, size + sizeof(extra));
+            if (grown) {
+                memcpy(grown + size, extra, sizeof(extra));
+                size += sizeof(extra) - 1;
+                data = grown;
+                l_info("[JAVA] boot.config: added job-worker and memory settings");
+            }
+        }
         l_info("[JAVA] AssetManager.open(%s): %s", n ? n : "?", data ? "found" : "not found");
         free(n);
         if (data) {
