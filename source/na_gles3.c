@@ -341,7 +341,9 @@ static int sized_to_unsized(GLenum ifmt, GLenum *format, GLenum *type) {
         case 0x8058: /* RGBA8 */ case 0x8C43: /* SRGB8_ALPHA8 */ case GL_RGBA:
         case 0x881A: /* RGBA16F */ case 0x8059: /* RGB10_A2 */
             *format = GL_RGBA; return 1;
-        case 0x8051: /* RGB8 */ case 0x8C41: /* SRGB8 */ case GL_RGB: case 0x8C3A: /* R11F_G11F_B10F */
+        case 0x8C3A: /* R11F_G11F_B10F: HDR render targets; GXM has no 24-bit color surface */
+            *format = GL_RGBA; return 1;
+        case 0x8051: /* RGB8 */ case 0x8C41: /* SRGB8 */ case GL_RGB:
             *format = GL_RGB; return 1;
         case 0x8D62: /* RGB565 */
             *format = GL_RGB; *type = GL_UNSIGNED_SHORT_5_6_5; return 1;
@@ -365,8 +367,11 @@ static int sized_to_unsized(GLenum ifmt, GLenum *format, GLenum *type) {
     }
 }
 
+static int tex_storage_logged = 0;
 static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
     GLuint tex = bound_texture(target);
+    if (tex_storage_logged++ < 64)
+        l_info("[GL] glTexStorage2D(tex %u, target 0x%x, %d levels, 0x%x, %dx%d)", tex, target, levels, ifmt, w, h);
     tex_storage *s = storage_for(tex, 1);
     if (s) {
         s->ifmt = ifmt;
@@ -474,11 +479,159 @@ static void glClearBufferfi_na(GLenum buffer, GLint drawbuffer, GLfloat depth, G
 static void glDrawBuffers_na(GLsizei n, const GLenum *bufs) {}
 static void glInvalidateFramebuffer_na(GLenum target, GLsizei n, const GLenum *attachments) {}
 
-static void glRenderbufferStorageMultisample_na(GLenum target, GLsizei samples, GLenum ifmt, GLsizei w, GLsizei h) {
-    glRenderbufferStorage(target, ifmt, w, h);
+/*
+ * Render targets
+ *
+ * vitaGL only knows depth/stencil renderbuffers. Unity renders into color
+ * renderbuffers (MSAA or not) and resolves them with glBlitFramebuffer, so
+ * a color renderbuffer is backed by a texture and attached as one;
+ * otherwise the framebuffer has no color surface and the GPU writes to
+ * address 0.
+ */
+typedef struct {
+    GLuint rb;
+    GLuint tex;
+    GLenum ifmt;
+    GLsizei w, h;
+} rb_info;
+
+#define MAX_RBS 256
+static rb_info rbs[MAX_RBS];
+static GLuint bound_rb = 0;
+static int gl_trace_left = 400; // FBO setup lines logged
+
+#define TRACE(...) do { if (gl_trace_left > 0) { gl_trace_left--; l_info("[GL] " __VA_ARGS__); } } while (0)
+
+static rb_info *rb_for(GLuint rb, int create) {
+    if (!rb) return NULL;
+    rb_info *free_slot = NULL;
+    for (int i = 0; i < MAX_RBS; i++) {
+        if (rbs[i].rb == rb) return &rbs[i];
+        if (!rbs[i].rb && !free_slot) free_slot = &rbs[i];
+    }
+    if (!create || !free_slot) return NULL;
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->rb = rb;
+    return free_slot;
 }
 
-static void glGetRenderbufferParameteriv_na(GLenum target, GLenum pname, GLint *params) { *params = 0; }
+static int is_color_format(GLenum ifmt) {
+    switch (ifmt) {
+        case 0x81A5: case 0x81A6: case 0x81A7: case 0x8CAC: // DEPTH_COMPONENT16/24/32/32F
+        case 0x88F0: case 0x8CAD: case 0x8D48: case GL_DEPTH_COMPONENT: // DEPTH24_STENCIL8, DEPTH32F_STENCIL8, STENCIL_INDEX8
+        case 0x84F9: // DEPTH_STENCIL
+            return 0;
+        default:
+            return 1;
+    }
+}
+
+static void glBindRenderbuffer_na(GLenum target, GLuint rb) {
+    bound_rb = rb;
+    glBindRenderbuffer(target, rb);
+}
+
+static void glRenderbufferStorage_na(GLenum target, GLenum ifmt, GLsizei w, GLsizei h) {
+    TRACE("glRenderbufferStorage(rb %u, 0x%x, %dx%d)", bound_rb, ifmt, w, h);
+    rb_info *r = rb_for(bound_rb, 1);
+    if (r) {
+        r->ifmt = ifmt;
+        r->w = w;
+        r->h = h;
+    }
+    if (!is_color_format(ifmt) || !r) {
+        glRenderbufferStorage(target, ifmt, w, h);
+        return;
+    }
+    GLenum format, type;
+    if (!sized_to_unsized(ifmt, &format, &type)) {
+        format = GL_RGBA;
+        type = GL_UNSIGNED_BYTE;
+    }
+    GLint old = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D_, &old);
+    if (!r->tex) glGenTextures(1, &r->tex);
+    glBindTexture(GL_TEXTURE_2D, r->tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, type, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)old);
+}
+
+static void glRenderbufferStorageMultisample_na(GLenum target, GLsizei samples, GLenum ifmt, GLsizei w, GLsizei h) {
+    glRenderbufferStorage_na(target, ifmt, w, h);
+}
+
+static void glFramebufferRenderbuffer_na(GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb) {
+    rb_info *r = rb_for(rb, 0);
+    TRACE("glFramebufferRenderbuffer(0x%x, rb %u%s)", attachment, rb, r && r->tex ? " as texture" : "");
+    if (r && r->tex) {
+        glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, r->tex, 0);
+        return;
+    }
+    if (attachment == GL_COLOR_ATTACHMENT0 && rb == 0) {
+        glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, 0, 0);
+        return;
+    }
+    if (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 16) return; // MRT: unsupported
+    glFramebufferRenderbuffer(target, attachment, rbtarget, rb);
+}
+
+static void glDeleteRenderbuffers_na(GLsizei n, const GLuint *ids) {
+    for (int i = 0; i < n; i++) {
+        rb_info *r = rb_for(ids[i], 0);
+        if (r) {
+            if (r->tex) glDeleteTextures(1, &r->tex);
+            memset(r, 0, sizeof(*r));
+        }
+        if (ids[i] == bound_rb) bound_rb = 0;
+    }
+    glDeleteRenderbuffers(n, ids);
+}
+
+static void glGetRenderbufferParameteriv_na(GLenum target, GLenum pname, GLint *params) {
+    rb_info *r = rb_for(bound_rb, 0);
+    switch (pname) {
+        case 0x8D42: *params = r ? r->w : 0; break;       // WIDTH
+        case 0x8D43: *params = r ? r->h : 0; break;       // HEIGHT
+        case 0x8D44: *params = r ? r->ifmt : 0; break;    // INTERNAL_FORMAT
+        case 0x8CAB: *params = 1; break;                  // SAMPLES
+        default: *params = 0; break;
+    }
+}
+
+static void glFramebufferTexture2D_na(GLenum target, GLenum attachment, GLenum textarget, GLuint tex, GLint level) {
+    TRACE("glFramebufferTexture2D(0x%x, 0x%x, tex %u, level %d)", attachment, textarget, tex, level);
+    if (attachment > GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 16) return; // MRT: unsupported
+    if (attachment != GL_COLOR_ATTACHMENT0) return; // depth textures: vitaGL keeps its own depth buffer
+    if (textarget != GL_TEXTURE_2D) {
+        static int warned = 0;
+        if (warned++ < 8) l_warn("glFramebufferTexture2D: target 0x%x not supported", textarget);
+        return;
+    }
+    glFramebufferTexture2D(target, attachment, textarget, tex, level);
+}
+
+static void glFramebufferTexture_na(GLenum target, GLenum attachment, GLuint tex, GLint level) {
+    glFramebufferTexture2D_na(target, attachment, GL_TEXTURE_2D, tex, level);
+}
+
+static GLenum glCheckFramebufferStatus_na(GLenum target) {
+    GLenum r = glCheckFramebufferStatus(target);
+    if (r != GL_FRAMEBUFFER_COMPLETE) TRACE("glCheckFramebufferStatus(0x%x) = 0x%x", target, r);
+    return r;
+}
+
+static void glBlitFramebuffer_na(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1,
+                                 GLbitfield mask, GLenum filter) {
+    static int logged_blits = 0;
+    if (logged_blits++ < 8)
+        l_info("[GL] glBlitFramebuffer(%d,%d-%d,%d -> %d,%d-%d,%d, mask 0x%x)", sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask);
+    if (!(mask & GL_COLOR_BUFFER_BIT)) return; // depth/stencil blits: not supported by vitaGL
+    glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, filter);
+}
 
 static void glColorMaski_na(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
     if (i == 0) glColorMask(r, g, b, a);
@@ -574,7 +727,10 @@ static const gl_entry gl_table[] = {
     { "glRenderbufferStorageMultisampleEXT", (void *)&glRenderbufferStorageMultisample_na },
     { "glRenderbufferStorageMultisampleIMG", (void *)&glRenderbufferStorageMultisample_na },
     { "glRenderbufferStorageMultisampleAPPLE", (void *)&glRenderbufferStorageMultisample_na },
-    E(glGetRenderbufferParameteriv), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glGetRenderbufferParameteriv), E(glBindRenderbuffer), E(glRenderbufferStorage),
+    E(glFramebufferRenderbuffer), E(glDeleteRenderbuffers), E(glFramebufferTexture2D), E(glFramebufferTexture),
+    { "glFramebufferTextureEXT", (void *)&glFramebufferTexture_na }, { "glFramebufferTextureOES", (void *)&glFramebufferTexture_na },
+    E(glCheckFramebufferStatus), E(glBlitFramebuffer), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
