@@ -45,6 +45,7 @@
 #include <SLES/OpenSLES_Android.h>
 
 #include "na_modules.h"
+#include "na_apk.h"
 #include "na_android.h"
 #include "na_egl.h"
 #include "utils/logger.h"
@@ -250,15 +251,13 @@ static long sysconf_na(int name) {
  */
 static long long lseek64_na(int fd, long long off, int whence) {
     long long r = lseek(fd, (off_t)off, whence);
-    static int traced = 0;
-    if (fd >= 3 && traced++ < 200) l_info("lseek64(%d, %lld, %d): %lld", fd, off, whence, r);
+    if (r < 0) l_warn("lseek64(%d, %lld, %d): %lld", fd, off, whence, r);
     return r;
 }
 
 static long lseek_na(int fd, long off, int whence) {
     long r = lseek(fd, off, whence);
-    static int traced = 0;
-    if (fd >= 3 && traced++ < 200) l_info("lseek(%d, %ld, %d): %ld", fd, off, whence, r);
+    if (r < 0) l_warn("lseek(%d, %ld, %d): %ld", fd, off, whence, r);
     return r;
 }
 
@@ -278,6 +277,7 @@ typedef struct {
 } statfs_bionic;
 
 static int statfs_na(const char *path, statfs_bionic *st) {
+    path = na_fix_path(path);
     l_info("statfs(%s)", path ? path : "(null)");
     memset(st, 0, sizeof(*st));
     st->f_type = 0xEF53;
@@ -351,6 +351,7 @@ static int ftruncate_na(int fd, long len) {
 }
 
 static int truncate_na(const char *path, long len) {
+    path = na_fix_path(path);
     int fd = open(path, O_WRONLY);
     if (fd < 0) return -1;
     int r = ftruncate_na(fd, len);
@@ -365,38 +366,59 @@ static int io_trace_left = 300;
 
 static long read_na(int fd, void *buf, size_t n) {
     long r = read(fd, buf, n);
-    if (fd >= 3 && io_trace_left > 0) { io_trace_left--; l_info("read(%d, %u): %ld", fd, (unsigned)n, r); }
+    if (r < 0 && io_trace_left > 0) { io_trace_left--; l_warn("read(%d, %u): %ld", fd, (unsigned)n, r); }
     return r;
 }
 
 static long write_na(int fd, const void *buf, size_t n) {
     long r = write(fd, buf, n);
-    if (fd >= 3 && io_trace_left > 0) { io_trace_left--; l_info("write(%d, %u): %ld", fd, (unsigned)n, r); }
+    if (fd >= 3 && r != (long)n && io_trace_left > 0) { io_trace_left--; l_warn("write(%d, %u): %ld", fd, (unsigned)n, r); }
     return r;
 }
 
+#define FIX(p) char fixbuf_##p[512]; p = na_apk_map_path(p, fixbuf_##p, sizeof(fixbuf_##p))
+
 static int rename_na(const char *a, const char *b) {
+    FIX(a);
+    FIX(b);
     int r = rename(a, b);
     l_info("rename(%s, %s): %d", a, b, r);
     return r;
 }
 
 static int mkdir_na(const char *p, int mode) {
+    FIX(p);
     int r = mkdir(p, mode);
     if (io_trace_left > 0) { io_trace_left--; l_info("mkdir(%s): %d", p, r); }
     return r;
 }
 
 static int unlink_na(const char *p) {
+    FIX(p);
     int r = unlink(p);
     if (io_trace_left > 0) { io_trace_left--; l_info("unlink(%s): %d", p, r); }
     return r;
 }
 
 static int rmdir_na(const char *p) {
+    FIX(p);
     int r = rmdir(p);
     if (io_trace_left > 0) { io_trace_left--; l_info("rmdir(%s): %d", p, r); }
     return r;
+}
+
+// realpath: the (Android) path stays as given, if it exists after mapping
+static char *realpath_na(const char *path, char *resolved) {
+    char mb[512];
+    struct stat st;
+    const char *m = na_apk_map_path(path, mb, sizeof(mb));
+    if (!path || stat(m, &st) != 0) {
+        errno = ENOENT;
+        return NULL;
+    }
+    if (!resolved) resolved = malloc(4096);
+    snprintf(resolved, 4096, "%s", path);
+    return resolved;
 }
 
 static int readlink_na(const char *path, char *buf, size_t sz) {
@@ -992,6 +1014,7 @@ so_default_dynlib na_dynlib[] = {
     { "lseek", (uintptr_t)&lseek_na },
     { "statfs", (uintptr_t)&statfs_na },
     { "readlink", (uintptr_t)&readlink_na },
+    { "realpath", (uintptr_t)&realpath_na },
     { "link", (uintptr_t)&fail_enosys },
     { "symlink", (uintptr_t)&fail_enosys },
     { "fchmod", (uintptr_t)&ret0 },

@@ -107,9 +107,7 @@ int fstat_soloader(int fd, stat64_bionic * buf) {
     if (res == 0)
         stat_newlib_to_bionic(&st, buf);
 
-    static int traced = 0;
-    if (fd >= 3 && traced++ < 200)
-        l_info("fstat(%i): %i, size %ld, mode 0%o", fd, res, res == 0 ? (long)st.st_size : -1L, res == 0 ? (unsigned)st.st_mode : 0);
+    if (res != 0) l_warn("fstat(%i): %i", fd, res);
     return res;
 }
 

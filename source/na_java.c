@@ -397,25 +397,25 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         r.l = jo_new_object("android/app/Activity");
     } else if (is(name, "getApplicationInfo")) {
         jobject ai = jo_new_object("android/content/pm/ApplicationInfo");
-        jo_set_string(ai, "sourceDir", APK_PATH);
-        jo_set_string(ai, "publicSourceDir", APK_PATH);
-        jo_set_string(ai, "nativeLibraryDir", DATA_PATH "lib");
-        jo_set_string(ai, "dataDir", DATA_PATH);
+        jo_set_string(ai, "sourceDir", ANDROID_APK_PATH);
+        jo_set_string(ai, "publicSourceDir", ANDROID_APK_PATH);
+        jo_set_string(ai, "nativeLibraryDir", ANDROID_LIB_DIR_);
+        jo_set_string(ai, "dataDir", ANDROID_DATA_DIR);
         jo_set_string(ai, "packageName", PACKAGE_NAME);
         jo_set_int(ai, "targetSdkVersion", 34);
         jo_set_int(ai, "minSdkVersion", 23);
         jo_set_int(ai, "flags", 0);
         r.l = ai;
     } else if (is(name, "getPackageCodePath") || is(name, "getPackageResourcePath")) {
-        r.l = jstr(APK_PATH);
+        r.l = jstr(ANDROID_APK_PATH);
     } else if (is(name, "getFilesDir") || is(name, "getNoBackupFilesDir")) {
-        r.l = file_object(DATA_PATH "files");
+        r.l = file_object(ANDROID_DATA_DIR "/files");
     } else if (is(name, "getCacheDir") || is(name, "getCodeCacheDir") || is(name, "getExternalCacheDir")) {
-        r.l = file_object(DATA_PATH "cache");
+        r.l = file_object(ANDROID_DATA_DIR "/cache");
     } else if (is(name, "getExternalFilesDir") || is(name, "getObbDir") || is(name, "getExternalStorageDirectory")) {
-        r.l = file_object(DATA_PATH "external");
+        r.l = file_object(ANDROID_EXTERNAL_DIR "/files");
     } else if (is(name, "getDataDir")) {
-        r.l = file_object(DATA_PATH);
+        r.l = file_object(ANDROID_DATA_DIR);
     } else if (is(name, "getExternalFilesDirs") || is(name, "getObbDirs")) {
         r.l = NULL;
     } else if (is(name, "getExternalStorageState")) {
@@ -431,13 +431,15 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         free(p);
     } else if (is(sc, "java/io/File") && is(name, "length")) {
         char *p = jo_get_string(self, "path");
+        char mb[512];
         struct stat st;
-        r.j = (p && stat(p, &st) == 0) ? (jlong)st.st_size : 0;
+        r.j = (p && stat(na_apk_map_path(p, mb, sizeof(mb)), &st) == 0) ? (jlong)st.st_size : 0;
         free(p);
     } else if (is(sc, "java/io/File") && is(name, "exists")) {
         char *p = jo_get_string(self, "path");
+        char mb[512];
         struct stat st;
-        r.z = (p && stat(p, &st) == 0) ? JNI_TRUE : JNI_FALSE;
+        r.z = (p && stat(na_apk_map_path(p, mb, sizeof(mb)), &st) == 0) ? JNI_TRUE : JNI_FALSE;
         free(p);
     } else if (is(sc, "java/io/File") && (is(name, "isDirectory") || is(name, "mkdirs") || is(name, "mkdir") ||
                                           is(name, "canWrite") || is(name, "canRead"))) {
@@ -458,7 +460,7 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         if (sig[strlen(sig) - 1] == 'J') r.j = 1048576; else r.i = 1048576;
     } else if (is(name, "getDataDirectory") || is(name, "getExternalStorageDirectory") ||
                is(name, "getDownloadCacheDirectory") || is(name, "getRootDirectory")) {
-        r.l = file_object(DATA_PATH "files");
+        r.l = file_object(ANDROID_DATA_DIR "/files");
 
     // PackageManager
     } else if (is(name, "getPackageManager")) {
@@ -706,7 +708,7 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         // System.loadLibrary name -> path of the .so (na_modules.c knows the game's libraries)
         char *n = jo_jstring_to_utf8((jstring)args[0].l);
         char path[256];
-        snprintf(path, sizeof(path), DATA_PATH "lib/lib%s.so", n ? n : "");
+        snprintf(path, sizeof(path), ANDROID_LIB_DIR_ "/lib%s.so", n ? n : "");
         l_info("[JAVA] findLibrary(%s) -> %s", n ? n : "?", path);
         free(n);
         r.l = jstr(path);

@@ -270,11 +270,55 @@ static int extract(apk_entry *e, const char *out_path) {
     return 0;
 }
 
+// Unity treats paths without a leading '/' as relative and prefixes them with
+// a base directory: "ux0:data/x/ux0:data/x/files/...". The last device name
+// in the path starts the real one.
+const char *na_fix_path(const char *path) {
+    if (!path) return path;
+    const char *best = path;
+    for (const char *p = path + 1; *p; p++) {
+        if ((p[0] == 'u' && strncmp(p, "ux0:", 4) == 0) || (p[0] == 'a' && strncmp(p, "app0:", 5) == 0) ||
+            (p[0] == 'u' && strncmp(p, "ur0:", 4) == 0))
+            best = p;
+    }
+    return best;
+}
+
+static const struct { const char *android; const char *vita; } path_map[] = {
+    { ANDROID_APK_PATH, DATA_PATH "base.apk" },
+    { ANDROID_LIB_DIR_, DATA_PATH "lib" },
+    { ANDROID_APP_DIR, DATA_PATH "app" },
+    { ANDROID_DATA_DIR, DATA_PATH "" },
+    { "/data/data/" PACKAGE_NAME, DATA_PATH "" },
+    { ANDROID_EXTERNAL_DIR, DATA_PATH "external" },
+};
+
 const char *na_apk_map_path(const char *path, char *buf, size_t buflen) {
     static const char prefix[] = APK_PATH "/";
+    path = na_fix_path(path);
+    if (path && path[0] == '/') {
+        for (unsigned i = 0; i < sizeof(path_map) / sizeof(path_map[0]); i++) {
+            size_t n = strlen(path_map[i].android);
+            if (strncmp(path, path_map[i].android, n) == 0 && (path[n] == 0 || path[n] == '/')) {
+                char tmp[512];
+                const char *rest = path + n;
+                const char *vita = path_map[i].vita;
+                size_t vl = strlen(vita);
+                // DATA_PATH ends in '/': avoid "//"
+                if (vl && vita[vl - 1] == '/' && rest[0] == '/') rest++;
+                snprintf(tmp, sizeof(tmp), "%s%s", vita, rest);
+                if (strlen(tmp) == vl && vl > 1 && tmp[vl - 1] == '/') tmp[vl - 1] = 0; // the data dir itself
+                snprintf(buf, buflen, "%s", tmp);
+                path = buf;
+                break;
+            }
+        }
+    }
     if (!path || strncmp(path, prefix, sizeof(prefix) - 1) != 0)
         return path;
-    const char *name = path + sizeof(prefix) - 1;
+    char name_copy[512];
+    snprintf(name_copy, sizeof(name_copy), "%s", path + sizeof(prefix) - 1);
+    const char *name = name_copy;
     while (*name == '/') name++;
     snprintf(buf, buflen, DATA_PATH "%s", name);
     size_t l = strlen(buf);
