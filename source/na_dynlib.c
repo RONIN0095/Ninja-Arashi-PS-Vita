@@ -540,10 +540,16 @@ static int rwlock_wrlock_na(void *lock) { return pthread_rwlock_wrlock(rwlock_ge
 static int rwlock_unlock_na(void *lock) { return pthread_rwlock_unlock(rwlock_get(lock)); }
 
 static int pthread_kill_na(pthread_t t, int sig) {
-    // The Boehm GC suspends threads with signals (SIGPWR/SIGXCPU). There
-    // are no signals on the Vita; see docs/NOTES.md.
-    l_warn("pthread_kill(%p, %d): signals are not supported", (void *)t, sig);
-    return 0;
+    // The Boehm GC suspends threads with signals (SIGPWR/SIGXCPU) and then
+    // waits for each one to acknowledge from its signal handler. There are no
+    // signals on the Vita, so "sent" signals hung that wait forever (Unity
+    // stops the world for UnloadUnusedAssets while loading a scene). ESRCH
+    // ("no such thread") is a case the GC handles: it skips the thread.
+    // Collection is off (GC_DONT_GC), so only Unity's liveness scan sees less.
+    if (sig == 0) return 0;
+    static int warned = 0;
+    if (warned++ < 4) l_warn("pthread_kill(%p, %d): no signals here, reporting ESRCH", (void *)t, sig);
+    return 3; // ESRCH (bionic)
 }
 
 /*
