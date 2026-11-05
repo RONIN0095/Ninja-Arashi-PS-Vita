@@ -228,7 +228,21 @@ static void gc_noop(void) {}
 static int gc_is_disabled(void) { return 1; }
 static int gc_collect_a_little(void) { return 0; }
 
+// Native stack traces for managed exceptions (Unity adds them to log
+// messages): IL2CPP's version walks the ELF notes of the loaded module and
+// faults here. An empty trace is enough.
+static void native_stack_trace_empty(const void *ex, uintptr_t **addresses, int *count, char **uuid, char **name) {
+    if (addresses) *addresses = NULL;
+    if (count) *count = 0;
+    if (uuid) *uuid = strdup("");
+    if (name) *name = strdup("libil2cpp.so");
+}
+
 static void *intercept(const char *symbol) {
+    if (strcmp(symbol, "il2cpp_native_stack_trace") == 0) {
+        l_info("dlsym(%s): empty traces", symbol);
+        return (void *)&native_stack_trace_empty;
+    }
     if (strncmp(symbol, "il2cpp_gc_", 10) != 0) return NULL;
     const char *s = symbol + 10;
     if (!strcmp(s, "enable") || !strcmp(s, "collect") || !strcmp(s, "start_incremental_collection") ||
