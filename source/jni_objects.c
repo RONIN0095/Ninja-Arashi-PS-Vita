@@ -399,6 +399,21 @@ static jmethodID DJ_GetMethodID(JNIEnv *env, jclass clazz, const char *name, con
     return (jmethodID)m;
 }
 
+// java.lang.reflect.Method objects (made by na_looper.c) carry their jmethodID
+static jmethodID DJ_FromReflectedMethod(JNIEnv *env, jobject method) {
+    if (jo_is_object(method)) return (jmethodID)(uintptr_t)jo_get_long(method, "__mid");
+    return NULL;
+}
+
+static jobject DJ_ToReflectedMethod(JNIEnv *env, jclass cls, jmethodID mid, jboolean is_static) {
+    DJMethod *m = (DJMethod *)mid;
+    jobject o = jo_new_object("java/lang/reflect/Method");
+    jo_set_long(o, "__mid", (jlong)(uintptr_t)mid);
+    if (m) jo_set_string(o, "__name", m->name);
+    jo_set_obj(o, "__class", (jobject)cls);
+    return o;
+}
+
 static jfieldID DJ_GetFieldID(JNIEnv *env, jclass clazz, const char *name, const char *sig) {
     sceKernelLockLwMutex(&jo_lock, 1, NULL);
     DJField *f = intern_field(name, sig);
@@ -777,6 +792,8 @@ void jni_objects_install(void) {
     t->DeleteLocalRef = DJ_DeleteLocalRef;
 
     t->GetMethodID = DJ_GetMethodID;
+    t->FromReflectedMethod = DJ_FromReflectedMethod;
+    t->ToReflectedMethod = DJ_ToReflectedMethod;
     t->GetFieldID = DJ_GetFieldID;
 
     t->GetObjectField = DJ_GetObjectField;

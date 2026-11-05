@@ -22,7 +22,8 @@ int na_looper_java_call(const char *cls, const char *name, const char *sig, jobj
 /** Runs the main looper's due messages and frame callbacks (main loop). */
 void na_looper_tick_main(void);
 
-/** Calls a method on a Java proxy backed by native code. */
-jobject na_proxy_invoke(jobject proxy, const char *method, jobject *args, int argc);
+/** Calls interface method iface.method(sig) on a Java proxy backed by native code. */
+jobject na_proxy_invoke(jobject proxy, const char *iface, const char *method, const char *sig,
+                        jobject *args, int argc);
 
 #endif // NA_LOOPER_H

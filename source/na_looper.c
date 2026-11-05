@@ -102,24 +102,58 @@ static looper *main_looper(void) {
 
 /*
  * Calling Java proxies (native code behind JNIBridge/ReflectionHelper)
+ *
+ * JNIBridge.newInterfaceProxy(ptr, Class[]) proxies (Unity's C++ and C#
+ * AndroidJavaProxy) are called through JNIBridge.invoke(ptr, Class, Method,
+ * Object[]); the native side gets the jmethodID with FromReflectedMethod.
+ * ReflectionHelper proxies go through nativeProxyInvoke(ptr, name, Object[]).
  */
-jobject na_proxy_invoke(jobject proxy, const char *method, jobject *args, int argc) {
-    if (!proxy || !jo_is_object(proxy) || strcmp(jo_class_name(proxy), "java/lang/reflect/Proxy") != 0)
-        return NULL;
-    static jobject (*invoke)(JNIEnv *, jclass, jlong, jstring, jobjectArray) = NULL;
-    if (!invoke) invoke = na_unity_native("nativeProxyInvoke", "(JLjava/lang/String;[Ljava/lang/Object;");
-    if (!invoke) return NULL;
-    JNIEnv *env = jo_env();
+#define PROXY_JNIBRIDGE 0
+#define PROXY_REFLECTION 1
+
+static jobject make_args(JNIEnv *env, jobject *args, int argc) {
     jclass objc = (*env)->FindClass(env, "java/lang/Object");
     jobjectArray arr = (*env)->NewObjectArray(env, argc, objc, NULL);
     for (int i = 0; i < argc; i++) (*env)->SetObjectArrayElement(env, arr, i, args[i]);
-    jclass helper = (*env)->FindClass(env, "com/unity3d/player/ReflectionHelper");
-    return invoke(env, helper, jo_get_long(proxy, "__ptr"), (*env)->NewStringUTF(env, method), arr);
+    return arr;
 }
 
-jobject na_new_proxy(jlong ptr) {
+jobject na_proxy_invoke(jobject proxy, const char *iface, const char *method, const char *sig,
+                        jobject *args, int argc) {
+    if (!proxy || !jo_is_object(proxy) || strcmp(jo_class_name(proxy), "java/lang/reflect/Proxy") != 0) {
+        l_warn("[looper] %s.%s on a non-proxy object %p", iface, method, proxy);
+        return NULL;
+    }
+    JNIEnv *env = jo_env();
+    jlong ptr = jo_get_long(proxy, "__ptr");
+
+    if (jo_get_int(proxy, "__kind") == PROXY_REFLECTION) {
+        static jobject (*invoke)(JNIEnv *, jclass, jlong, jstring, jobjectArray) = NULL;
+        if (!invoke) invoke = na_unity_native("nativeProxyInvoke", "(JLjava/lang/String;[Ljava/lang/Object;");
+        if (!invoke) return NULL;
+        jclass helper = (*env)->FindClass(env, "com/unity3d/player/ReflectionHelper");
+        return invoke(env, helper, ptr, (*env)->NewStringUTF(env, method), make_args(env, args, argc));
+    }
+
+    static jobject (*invoke)(JNIEnv *, jclass, jlong, jclass, jobject, jobjectArray) = NULL;
+    if (!invoke) invoke = na_unity_native("invoke", "(JLjava/lang/Class;Ljava/lang/reflect/Method;[Ljava/lang/Object;");
+    if (!invoke) return NULL;
+    // the interface the proxy was made for, if it is the one we are calling
+    jclass cls = (jclass)jo_get_obj(proxy, "__iface");
+    if (!cls || strcmp((const char *)cls, iface) != 0) cls = (*env)->FindClass(env, iface);
+    jobject m = jo_new_object("java/lang/reflect/Method");
+    jo_set_long(m, "__mid", (jlong)(uintptr_t)(*env)->GetMethodID(env, cls, method, sig));
+    jo_set_string(m, "__name", method);
+    jo_set_obj(m, "__class", (jobject)cls);
+    jclass bridge = (*env)->FindClass(env, "bitter/jnibridge/JNIBridge");
+    return invoke(env, bridge, ptr, cls, m, make_args(env, args, argc));
+}
+
+static jobject new_proxy(jlong ptr, int kind, jobject iface) {
     jobject p = jo_new_object("java/lang/reflect/Proxy");
     jo_set_long(p, "__ptr", ptr);
+    jo_set_int(p, "__kind", kind);
+    jo_set_obj(p, "__iface", iface);
     return p;
 }
 
@@ -155,17 +189,17 @@ static void dispatch(queued *m) {
                cb && jo_is_object(cb) ? jo_class_name(cb) : (cb ? "(foreign object)" : "(none)"));
     }
     if (m->runnable) {
-        na_proxy_invoke(m->runnable, "run", NULL, 0);
+        na_proxy_invoke(m->runnable, "java/lang/Runnable", "run", "()V", NULL, 0);
         return;
     }
     jobject cb = m->handler ? jo_get_obj(m->handler, "__callback") : NULL;
     if (cb) {
         jobject a[1] = { m->msg };
-        na_proxy_invoke(cb, "handleMessage", a, 1);
+        na_proxy_invoke(cb, "android/os/Handler$Callback", "handleMessage", "(Landroid/os/Message;)Z", a, 1);
     } else {
         // Message.callback (a Runnable posted with the message)
         jobject r = m->msg ? jo_get_obj(m->msg, "callback") : NULL;
-        if (r) na_proxy_invoke(r, "run", NULL, 0);
+        if (r) na_proxy_invoke(r, "java/lang/Runnable", "run", "()V", NULL, 0);
     }
 }
 
@@ -200,7 +234,7 @@ static uint64_t service(looper *l) {
         sceKernelUnlockLwMutex(&l->lock, 1);
         l->next_frame_us = t + 16666;
         jobject a[1] = { boxed_long((jlong)t * 1000) };
-        for (int i = 0; i < n; i++) na_proxy_invoke(cbs[i], "doFrame", a, 1);
+        for (int i = 0; i < n; i++) na_proxy_invoke(cbs[i], "android/view/Choreographer$FrameCallback", "doFrame", "(J)V", a, 1);
     }
     if (l->n_frame_cbs) {
         uint64_t f = l->next_frame_us > t ? l->next_frame_us - t : 0;
@@ -251,12 +285,18 @@ int na_looper_java_call(const char *cls, const char *name, const char *sig, jobj
     const char *sc = (self && jo_is_object(self)) ? jo_class_name(self) : "";
 
     if (is(name, "newInterfaceProxy") && argc >= 1) {
-        r->l = na_new_proxy(args[0].j);
+        // newInterfaceProxy(long ptr, Class[] interfaces)
+        JNIEnv *env = jo_env();
+        jobject iface = NULL;
+        if (argc >= 2 && args[1].l && (*env)->GetArrayLength(env, args[1].l) > 0)
+            iface = (*env)->GetObjectArrayElement(env, args[1].l, 0);
+        r->l = new_proxy(args[0].j, PROXY_JNIBRIDGE, iface);
+        l_info("[looper] newInterfaceProxy(%s) -> %p", iface ? (const char *)iface : "?", r->l);
         return 1;
     }
     if (is(name, "disableInterfaceProxy")) return 1;
     if ((is(name, "newProxyInstance") || is(name, "createProxy")) && argc >= 1 && sig[1] == 'J') {
-        r->l = na_new_proxy(args[0].j);
+        r->l = new_proxy(args[0].j, PROXY_REFLECTION, NULL);
         l_info("[looper] %s.%s -> proxy %p", cls, name, r->l);
         return 1;
     }
@@ -390,6 +430,17 @@ int na_looper_java_call(const char *cls, const char *name, const char *sig, jobj
             sceKernelUnlockLwMutex(&l->lock, 1);
             return 1;
         }
+    }
+
+    // java.lang.reflect.Method made for JNIBridge.invoke
+    if (is(sc, "java/lang/reflect/Method")) {
+        if (is(name, "getName")) { r->l = jo_get_obj(self, "__name"); return 1; }
+        if (is(name, "getDeclaringClass")) { r->l = jo_get_obj(self, "__class"); return 1; }
+        if (is(name, "hashCode")) { r->i = (jint)(uintptr_t)jo_get_long(self, "__mid"); return 1; }
+    }
+    if (is(sc, "java/lang/reflect/Proxy")) {
+        if (is(name, "hashCode")) { r->i = (jint)jo_get_long(self, "__ptr"); return 1; }
+        if (is(name, "equals")) { r->z = argc >= 1 && args[0].l == self; return 1; }
     }
 
     // Boxed values passed to proxies
