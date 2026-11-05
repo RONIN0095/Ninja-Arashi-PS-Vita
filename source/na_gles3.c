@@ -915,6 +915,48 @@ static void glUseProgram_na(GLuint p) {
     glUseProgram(p);
 }
 
+// vitaGL crashes drawing with a program that never linked (no vertex shader attached)
+#define MAX_PROGS 4096
+static uint8_t prog_linked[MAX_PROGS];
+
+static void glCompileShader_na(GLuint s) {
+    glCompileShader(s);
+    GLint ok = 1;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        static int warned = 0;
+        if (warned++ < 32) {
+            char info[512] = "";
+            GLsizei len = 0;
+            glGetShaderInfoLog(s, sizeof(info) - 1, &len, info);
+            info[len > 0 && len < (GLsizei)sizeof(info) ? len : 0] = 0;
+            l_warn("[GL] glCompileShader(%u) failed: %s", s, info);
+        }
+    }
+}
+
+static void glLinkProgram_na(GLuint p) {
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (p < MAX_PROGS) prog_linked[p] = ok ? 1 : 0;
+    if (!ok) {
+        static int warned = 0;
+        if (warned++ < 32) l_warn("[GL] glLinkProgram(%u) failed", p);
+    }
+}
+
+static void glDeleteProgram_na(GLuint p) {
+    if (p < MAX_PROGS) prog_linked[p] = 0;
+    glDeleteProgram(p);
+}
+
+static int program_ok(void) {
+    if (cur_program && cur_program < MAX_PROGS && prog_linked[cur_program]) return 1;
+    if (bad_draws++ < 40) l_warn("[GL] draw %d skipped: program %u is not linked", draw_no, cur_program);
+    return 0;
+}
+
 static uint32_t max_index(const void *p, GLsizei count, GLenum type) {
     uint32_t m = 0;
     if (type == GL_UNSIGNED_SHORT) {
@@ -934,6 +976,7 @@ static uint32_t max_index(const void *p, GLsizei count, GLenum type) {
 static int check_draw(GLsizei count, GLenum type, const void *indices, GLint base, GLint first, int elements,
                       char *desc, size_t desc_size) {
     if (count <= 0) return 0;
+    if (!program_ok()) return 0;
     uint32_t last;
     if (elements) {
         int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
@@ -1136,7 +1179,7 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsInstancedBaseVertexEXT", (void *)&glDrawElementsInstancedBaseVertex_na },
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
-    E(glDrawElementsInstanced), E(glUseProgram),
+    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCompileShader),
     E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
     { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
     { "glUnmapBufferOES", (void *)&glUnmapBuffer_na }, E(glFlushMappedBufferRange),
