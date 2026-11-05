@@ -23,6 +23,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -738,12 +739,205 @@ UIV(1) UIV(2) UIV(3) UIV(4)
 
 static void glGetUniformiv_na(GLuint p, GLint loc, GLint *params) { *params = 0; }
 
+/*
+ * Draw validation
+ *
+ * A draw that reads past a vertex or index buffer faults on the GPU ("GPU
+ * crash", no CPU stack to look at). Every draw is checked against vitaGL's
+ * own buffer state first: out-of-range draws are skipped and logged. The
+ * first draws of the game scene are also logged one by one and followed by
+ * glFinish, so a crash that gets past the checks still names its draw.
+ */
+typedef struct { // vitaGL's vbo (shared.h): only the leading fields
+    void *ptr;
+    int32_t size;
+} vgl_vbo;
+
+typedef struct {
+    uint16_t streamIndex, offset;
+    uint8_t format, componentCount;
+    uint16_t regIndex;
+} vgl_attr;
+
+typedef struct {
+    uint16_t stride, indexSource;
+} vgl_stream;
+
+typedef struct { // vitaGL's vao (shared.h), VERTEX_ATTRIBS_NUM = 16
+    uint32_t index_array_unit;
+    uint8_t vertex_attrib_size[16];
+    uint32_t vertex_attrib_offsets[16];
+    uint32_t vertex_attrib_vbo[16];
+    uint32_t vertex_attrib_state;
+    uint32_t vertex_attrib_divisor;
+    float *vertex_attrib_value[16];
+    vgl_attr vertex_attrib_config[16];
+    vgl_stream vertex_stream_config[16];
+} vgl_vao;
+
+extern vgl_vao *cur_vao; // vitaGL buffers.c
+extern volatile int na_egl_swap_count; // na_egl.c
+
+static GLuint cur_program = 0;
+static int draw_no = 0, draws_traced = 0, bad_draws = 0;
+#define TRACE_FROM_SWAP 3   // the game scene starts after the third swap
+#define TRACED_DRAWS 300
+
+static void glUseProgram_na(GLuint p) {
+    cur_program = p;
+    glUseProgram(p);
+}
+
+static uint32_t max_index(const void *p, GLsizei count, GLenum type) {
+    uint32_t m = 0;
+    if (type == GL_UNSIGNED_SHORT) {
+        const uint16_t *s = p;
+        for (GLsizei i = 0; i < count; i++) if (s[i] > m) m = s[i];
+    } else if (type == GL_UNSIGNED_INT) {
+        const uint32_t *s = p;
+        for (GLsizei i = 0; i < count; i++) if (s[i] > m) m = s[i];
+    } else {
+        const uint8_t *s = p;
+        for (GLsizei i = 0; i < count; i++) if (s[i] > m) m = s[i];
+    }
+    return m;
+}
+
+// Returns 1 if the draw stays inside its buffers; desc gets a short description.
+static int check_draw(GLsizei count, GLenum type, const void *indices, GLint base, GLint first, int elements,
+                      char *desc, size_t desc_size) {
+    if (count <= 0) return 0;
+    uint32_t last;
+    if (elements) {
+        int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
+        vgl_vbo *ib = (vgl_vbo *)cur_vao->index_array_unit;
+        const void *src;
+        if (ib) {
+            uint32_t off = (uint32_t)(uintptr_t)indices;
+            if (!ib->ptr || off + (uint32_t)count * isz > (uint32_t)ib->size) {
+                if (bad_draws++ < 40)
+                    l_warn("[GL] draw %d skipped (prog %u): %d indices at +%u past index buffer of %d bytes (ptr %p)",
+                           draw_no, cur_program, count, off, ib->size, ib->ptr);
+                return 0;
+            }
+            src = (const uint8_t *)ib->ptr + off;
+        } else {
+            src = indices;
+            if ((uintptr_t)src < 0x81000000) {
+                if (bad_draws++ < 40)
+                    l_warn("[GL] draw %d skipped (prog %u): no index buffer, indices %p", draw_no, cur_program, indices);
+                return 0;
+            }
+        }
+        last = max_index(src, count, type) + base;
+    } else {
+        last = first + count - 1;
+    }
+    snprintf(desc, desc_size, "count %d, last vertex %u", count, last);
+
+    uint32_t state = cur_vao->vertex_attrib_state;
+    for (int i = 0; i < 16; i++) {
+        if (!(state & (1u << i))) continue;
+        uint32_t id = cur_vao->vertex_attrib_vbo[i];
+        uint32_t off = cur_vao->vertex_attrib_offsets[i];
+        uint32_t stride = cur_vao->vertex_stream_config[i].stride;
+        uint32_t comps = cur_vao->vertex_attrib_config[i].componentCount;
+        if (!id) {
+            if (off < 0x81000000) {
+                if (bad_draws++ < 40)
+                    l_warn("[GL] draw %d skipped (prog %u): attrib %d enabled without buffer (pointer 0x%x)",
+                           draw_no, cur_program, i, off);
+                return 0;
+            }
+            continue; // client-side array
+        }
+        vgl_vbo *vb = (vgl_vbo *)id;
+        uint32_t divided = cur_vao->vertex_attrib_divisor & (1u << i);
+        uint32_t need = off + (divided ? 0 : last) * stride + comps;
+        if (!vb->ptr || need > (uint32_t)vb->size) {
+            if (bad_draws++ < 40)
+                l_warn("[GL] draw %d skipped (prog %u): attrib %d needs %u bytes (offset %u, stride %u, last vertex %u), "
+                       "buffer has %d (ptr %p)", draw_no, cur_program, i, need, off, stride, last, vb->size, vb->ptr);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int trace_this_draw(void) {
+    return na_egl_swap_count >= TRACE_FROM_SWAP && draws_traced < TRACED_DRAWS;
+}
+
+static void traced(const char *what, const char *desc) {
+    draws_traced++;
+    l_info("[GL] draw %d: %s prog %u, %s, vao attribs 0x%x", draw_no, what, cur_program, desc,
+           cur_vao->vertex_attrib_state);
+}
+
+static void traced_done(void) {
+    glFinish();
+    l_info("[GL] draw %d ok", draw_no);
+}
+
+static void glDrawArrays_na(GLenum mode, GLint first, GLsizei count) {
+    char desc[96];
+    draw_no++;
+    if (!check_draw(count, 0, NULL, 0, first, 0, desc, sizeof(desc))) return;
+    int t = trace_this_draw();
+    if (t) traced("DrawArrays", desc);
+    glDrawArrays(mode, first, count);
+    if (t) traced_done();
+}
+
+static void glDrawArraysInstanced_na(GLenum mode, GLint first, GLsizei count, GLsizei n) {
+    char desc[96];
+    draw_no++;
+    if (!check_draw(count, 0, NULL, 0, first, 0, desc, sizeof(desc))) return;
+    int t = trace_this_draw();
+    if (t) traced("DrawArraysInstanced", desc);
+    glDrawArraysInstanced(mode, first, count, n);
+    if (t) traced_done();
+}
+
+static void glDrawElements_na(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+    char desc[96];
+    draw_no++;
+    if (!check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc))) return;
+    int t = trace_this_draw();
+    if (t) traced("DrawElements", desc);
+    glDrawElements(mode, count, type, indices);
+    if (t) traced_done();
+}
+
+static void glDrawElementsBaseVertex_na(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint base) {
+    char desc[96];
+    draw_no++;
+    if (!check_draw(count, type, indices, base, 0, 1, desc, sizeof(desc))) return;
+    int t = trace_this_draw();
+    if (t) traced("DrawElementsBaseVertex", desc);
+    if (base == 0)
+        glDrawElements(mode, count, type, indices);
+    else
+        glDrawElementsBaseVertex(mode, count, type, indices, base);
+    if (t) traced_done();
+}
+
+static void glDrawElementsInstanced_na(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei n) {
+    char desc[96];
+    draw_no++;
+    if (!check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc))) return;
+    int t = trace_this_draw();
+    if (t) traced("DrawElementsInstanced", desc);
+    glDrawElementsInstanced(mode, count, type, indices, n);
+    if (t) traced_done();
+}
+
 static void glDrawElementsInstancedBaseVertex_na(GLenum mode, GLsizei count, GLenum type, const void *indices,
                                                  GLsizei instances, GLint basevertex) {
     if (basevertex == 0)
-        glDrawElementsInstanced(mode, count, type, indices, instances);
+        glDrawElementsInstanced_na(mode, count, type, indices, instances);
     else
-        glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+        glDrawElementsBaseVertex_na(mode, count, type, indices, basevertex);
 }
 
 /*
@@ -814,8 +1008,12 @@ static const gl_entry gl_table[] = {
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
     { "glDrawElementsInstancedBaseVertexEXT", (void *)&glDrawElementsInstancedBaseVertex_na },
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
-    { "glDrawElementsBaseVertexEXT", (void *)&glDrawElementsBaseVertex },
-    { "glDrawElementsBaseVertexOES", (void *)&glDrawElementsBaseVertex },
+    E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
+    E(glDrawElementsInstanced), E(glUseProgram),
+    { "glDrawElementsBaseVertexEXT", (void *)&glDrawElementsBaseVertex_na },
+    { "glDrawElementsBaseVertexOES", (void *)&glDrawElementsBaseVertex_na },
+    { "glDrawArraysInstancedEXT", (void *)&glDrawArraysInstanced_na },
+    { "glDrawElementsInstancedEXT", (void *)&glDrawElementsInstanced_na },
     E(glFenceSync), E(glClientWaitSync), E(glWaitSync), E(glDeleteSync), E(glIsSync),
 
     // Program binaries lose vitaGL's attribute bindings: let Unity compile from source
