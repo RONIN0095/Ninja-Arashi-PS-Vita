@@ -32,6 +32,7 @@
 #include "jni_objects.h"
 #include "na_egl.h"
 #include "na_input.h"
+#include "na_looper.h"
 #include "na_unity.h"
 #include "utils/dialog.h"
 #include "utils/glutil.h"
@@ -110,6 +111,7 @@ int main() {
     int frame = 0;
     while (1) {
         na_input_poll();
+        na_looper_tick_main();
         int swaps_before = na_egl_swap_count;
         int r = na_unity_frame();
         if (frame < 5 || frame % 600 == 0)

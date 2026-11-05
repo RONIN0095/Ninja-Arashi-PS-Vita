@@ -19,6 +19,7 @@
  */
 
 #include "jni_objects.h"
+#include "na_looper.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -343,6 +344,10 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
     jvalue r;
     r.j = 0;
     const char *sc = self_class(self);
+
+    // Looper/Handler/Message/Choreographer/proxies (na_looper.c)
+    if (na_looper_java_call(cls, name, sig, self, args, argc, &r))
+        return r;
 
     // Input events (na_input.c)
     if (self && jo_is_object(self) && na_input_event_call(name, sig, self, args, argc, &r))

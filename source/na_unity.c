@@ -70,6 +70,7 @@ static native_entry *find_native(const char *name) {
 }
 
 // The native if its argument list matches; NULL (and a log line) otherwise.
+void *na_unity_native(const char *name, const char *args);
 static void *native_with_args(const char *name, const char *args) {
     native_entry *e = find_native(name);
     if (!e) {
@@ -170,3 +171,5 @@ void na_unity_inject_event(jobject ev) {
 jobject na_unity_player(void) {
     return player;
 }
+
+void *na_unity_native(const char *name, const char *args) { return native_with_args(name, args); }

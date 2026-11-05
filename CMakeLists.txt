@@ -105,6 +105,7 @@ set(SOURCES
     source/na_gles3.c
     source/na_input.c
     source/na_java.c
+    source/na_looper.c
     source/na_modules.c
     source/na_shaders.c
     source/na_sles.c
