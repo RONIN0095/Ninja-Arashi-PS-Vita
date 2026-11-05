@@ -33,6 +33,8 @@
 #include "na_egl.h"
 #include "na_input.h"
 #include "na_looper.h"
+
+void na_java_tick(void); // na_java.c
 #include "na_unity.h"
 #include "utils/dialog.h"
 #include "utils/glutil.h"
@@ -68,8 +70,16 @@ static int watchdog_thread(SceSize args, void *argp) {
         sceKernelDelayThread(1000 * 1000);
         uint64_t now = sceKernelGetProcessTimeWide();
         uint64_t last = log_last_activity_us > last_frame_us ? log_last_activity_us : last_frame_us;
-        if (last && now - last > 30ULL * 1000 * 1000) {
-            l_fatal("Watchdog: no progress for 30 s, crashing on purpose for a core dump.");
+        // L + R + SELECT held for 3 s: a core dump on request (shows where every thread is)
+        static int combo_s = 0;
+        SceCtrlData pad;
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+        int combo = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT)) ==
+                    (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT);
+        combo_s = combo ? combo_s + 1 : 0;
+        if (combo_s >= 3 || (last && now - last > 30ULL * 1000 * 1000)) {
+            if (combo_s >= 3) l_fatal("L+R+SELECT: crashing on purpose for a core dump.");
+            else l_fatal("Watchdog: no progress for 30 s, crashing on purpose for a core dump.");
             sceKernelDelayThread(200 * 1000);
             kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
             *(volatile int *)0 = 0;
@@ -112,6 +122,7 @@ int main() {
     while (1) {
         na_input_poll();
         na_looper_tick_main();
+        na_java_tick();
         int swaps_before = na_egl_swap_count;
         int r = na_unity_frame();
         if (frame < 5 || frame % 600 == 0)

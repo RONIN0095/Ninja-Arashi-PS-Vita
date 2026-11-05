@@ -30,6 +30,8 @@
 #include <vitaGL.h>
 
 #include "na_shaders.h"
+
+static void glBindFramebuffer_na(GLenum target, GLuint fb); // with the screenshot code at the end
 #include "utils/logger.h"
 
 #ifndef GL_MAJOR_VERSION
@@ -813,6 +815,8 @@ static void glFramebufferTexture2D_na(GLenum target, GLenum attachment, GLenum t
     TRACE("glFramebufferTexture2D(0x%x, 0x%x, tex %u, level %d)", attachment, textarget, tex, level);
     if (attachment > GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 16) return; // MRT: unsupported
     if (attachment != GL_COLOR_ATTACHMENT0) return; // depth textures: vitaGL keeps its own depth buffer
+    extern GLuint na_first_color_target;
+    if (!na_first_color_target && tex) na_first_color_target = tex;
     if (textarget != GL_TEXTURE_2D) {
         static int warned = 0;
         if (warned++ < 8) l_warn("glFramebufferTexture2D: target 0x%x not supported", textarget);
@@ -1184,7 +1188,7 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsInstancedBaseVertexEXT", (void *)&glDrawElementsInstancedBaseVertex_na },
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
-    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCompileShader),
+    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCompileShader), E(glBindFramebuffer),
     E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
     { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
     { "glUnmapBufferOES", (void *)&glUnmapBuffer_na }, E(glFlushMappedBufferRange),
@@ -1272,6 +1276,82 @@ void *na_gl_get_proc(const char *name) {
     void *f = vglGetProcAddress(name);
     log_lookup(name, f ? "vitaGL" : "MISSING");
     return f;
+}
+
+/*
+ * Screenshots for debugging: the screen and Unity's offscreen color target
+ * (the first texture attached to a framebuffer), saved as TGA files next to
+ * the log, with a brightness summary in the log.
+ */
+GLuint na_first_color_target = 0;
+#define first_color_target na_first_color_target
+static GLuint bound_draw_fb = 0, bound_read_fb = 0;
+
+static void glBindFramebuffer_na(GLenum target, GLuint fb) {
+    if (target == GL_FRAMEBUFFER || target == 0x8CA9) bound_draw_fb = fb; // DRAW_FRAMEBUFFER
+    if (target == GL_FRAMEBUFFER || target == 0x8CA8) bound_read_fb = fb; // READ_FRAMEBUFFER
+    glBindFramebuffer(target, fb);
+}
+
+static void save_pixels(const char *name, const uint8_t *px, int w, int h) {
+    uint64_t sum[3] = { 0, 0, 0 };
+    int lit = 0;
+    for (int i = 0; i < w * h; i++) {
+        const uint8_t *p = &px[i * 4];
+        sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2];
+        if (p[0] > 8 || p[1] > 8 || p[2] > 8) lit++;
+    }
+    l_info("[GL] screenshot %s: %dx%d, %d%% of pixels not black, average rgb %d/%d/%d", name, w, h,
+           (int)((int64_t)lit * 100 / (w * h)), (int)(sum[0] / (w * h)), (int)(sum[1] / (w * h)), (int)(sum[2] / (w * h)));
+
+    char path[128];
+    snprintf(path, sizeof(path), DATA_PATH "%s.tga", name);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    uint8_t hdr[18] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, (uint8_t)w, (uint8_t)(w >> 8), (uint8_t)h, (uint8_t)(h >> 8), 32, 8 };
+    fwrite(hdr, 1, 18, f);
+    uint8_t *row = malloc(w * 4);
+    for (int y = 0; y < h; y++) { // GL rows are bottom-up, as TGA's default
+        for (int x = 0; x < w; x++) {
+            const uint8_t *p = &px[(y * w + x) * 4];
+            row[x * 4 + 0] = p[2]; row[x * 4 + 1] = p[1]; row[x * 4 + 2] = p[0]; row[x * 4 + 3] = 255;
+        }
+        fwrite(row, 1, w * 4, f);
+    }
+    free(row);
+    fclose(f);
+}
+
+void na_gl_screenshot(int n) {
+    const int w = 960, h = 544;
+    uint8_t *px = malloc(w * h * 4);
+    if (!px) return;
+    glFinish();
+    char name[32];
+
+    // What is on screen (Unity has the default framebuffer bound when it swaps)
+    if (bound_read_fb != 0) glBindFramebuffer(0x8CA8, 0);
+    memset(px, 0, w * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    snprintf(name, sizeof(name), "shot%d_screen", n);
+    save_pixels(name, px, w, h);
+
+    // Unity's offscreen target
+    if (first_color_target) {
+        GLuint fb = 0;
+        glGenFramebuffers(1, &fb);
+        glBindFramebuffer(0x8CA8, fb);
+        glFramebufferTexture2D(0x8CA8, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, first_color_target, 0);
+        memset(px, 0, w * h * 4);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        snprintf(name, sizeof(name), "shot%d_target", n);
+        save_pixels(name, px, w, h);
+        glBindFramebuffer(0x8CA8, 0);
+        glDeleteFramebuffers(1, &fb);
+    }
+    glBindFramebuffer(0x8CA8, bound_read_fb);
+    glBindFramebuffer(0x8CA9, bound_draw_fb);
+    free(px);
 }
 
 void na_gles3_init(void) {

@@ -73,7 +73,23 @@ static inline uint32_t ptr_hash(uintptr_t p) {
 
 static void objset_add(uintptr_t p) {
     if (objset_count >= DJ_OBJSET_SIZE * 3 / 4) {
-        l_error("[JO] Object set is full, leaking object tracking for %p", (void *)p);
+        static int reported = 0;
+        if (!reported++) {
+            // Which classes fill the set: names the leak
+            DJClass *cls[32] = { 0 };
+            int counts[32] = { 0 }, n = 0;
+            for (int i = 0; i < DJ_OBJSET_SIZE; i++) {
+                if (objset[i] <= 1) continue;
+                DJClass *c = ((DJObject *)objset[i])->cls;
+                int k = 0;
+                while (k < n && cls[k] != c) k++;
+                if (k == n && n < 32) cls[n++] = c;
+                if (k < n) counts[k]++;
+            }
+            for (int k = 0; k < n; k++)
+                if (counts[k] > 50) l_error("[JO] live objects: %d x %s", counts[k], cls[k] ? cls[k]->name : "?");
+        }
+        if (reported < 8) l_error("[JO] Object set is full, leaking object tracking for %p", (void *)p);
         return;
     }
     uint32_t i = ptr_hash(p);

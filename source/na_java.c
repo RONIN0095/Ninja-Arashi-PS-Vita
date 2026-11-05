@@ -339,6 +339,36 @@ static const char *self_class(jobject self) {
     return self && jo_is_object(self) ? jo_class_name(self) : "";
 }
 
+/*
+ * Asset pack state queries, answered from the main loop (see na_java_tick)
+ */
+#define MAX_PACK_QUERIES 16
+static struct { jobject name, callback; } pack_queries[MAX_PACK_QUERIES];
+static int n_pack_queries = 0;
+
+void *na_unity_native(const char *name, const char *args); // na_unity.c
+
+static void na_java_post_pack_state(jobject name, jobject callback) {
+    if (n_pack_queries < MAX_PACK_QUERIES) {
+        pack_queries[n_pack_queries].name = name;
+        pack_queries[n_pack_queries].callback = callback;
+        n_pack_queries++;
+    }
+}
+
+void na_java_tick(void) {
+    if (!n_pack_queries) return;
+    void (*result)(JNIEnv *, jobject, jstring, jint, jint) =
+        na_unity_native("nativeStatusQueryResult", "(Ljava/lang/String;II");
+    int n = n_pack_queries;
+    n_pack_queries = 0;
+    for (int i = 0; i < n && result; i++) {
+        // AssetPackStatus.COMPLETED (4), AssetPackErrorCode.NO_ERROR (0)
+        result(jo_env(), pack_queries[i].callback, (jstring)pack_queries[i].name, 4, 0);
+        l_info("[JAVA] asset pack state reported");
+    }
+}
+
 jvalue jo_java_call(const char *cls, const char *name, const char *sig,
                     jobject self, const jvalue *args, int argc) {
     jvalue r;
@@ -738,6 +768,23 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         l_info("[JAVA] findLibrary(%s) -> %s", n ? n : "?", path);
         free(n);
         r.l = jstr(path);
+    } else if (strstr(cls, "PlayAssetDeliveryUnityWrapper")) {
+        // No Google Play here: every asset pack is inside the APK. Unity
+        // waits for the state of its core packs before loading the game's
+        // first real scene, so the query is answered (asynchronously, from
+        // the main loop) as "completed".
+        if (is(name, "playCoreApiMissing")) {
+            r.z = JNI_TRUE;
+        } else if (is(name, "init")) {
+            r.l = jo_new_object("com/unity3d/player/PlayAssetDeliveryUnityWrapper");
+        } else if (is(name, "getAssetPackState") && argc >= 2) {
+            char *n = jo_jstring_to_utf8((jstring)args[0].l);
+            l_info("[JAVA] getAssetPackState(%s): reporting it installed", n ? n : "?");
+            free(n);
+            na_java_post_pack_state(args[0].l, args[1].l);
+        } else {
+            r = default_return(sig);
+        }
     } else if (strstr(cls, "AlertDialog") || strstr(sc, "AlertDialog")) {
         // Unity reports fatal errors in a dialog: put the text in the log
         for (int i = 0; i < argc; i++) {

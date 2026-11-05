@@ -246,7 +246,11 @@ EGLBoolean na_eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface, EGLint attrib
     OK(EGL_TRUE);
 }
 
+void na_gl_screenshot(int n); // na_gles3.c
+
 EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    // Debug screenshots: 5 s and 20 s into the game
+    if (na_egl_swap_count == 150 || na_egl_swap_count == 600) na_gl_screenshot(na_egl_swap_count);
     vglSwapBuffers(GL_FALSE);
     na_egl_swap_count++;
     OK(EGL_TRUE);
