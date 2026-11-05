@@ -951,9 +951,14 @@ static void glDeleteProgram_na(GLuint p) {
     glDeleteProgram(p);
 }
 
+int vglCurrentProgramDrawable(char *info, int info_size); // extras/patches/vitagl-zz-program-check.patch
+
 static int program_ok(void) {
-    if (cur_program && cur_program < MAX_PROGS && prog_linked[cur_program]) return 1;
-    if (bad_draws++ < 40) l_warn("[GL] draw %d skipped: program %u is not linked", draw_no, cur_program);
+    char info[160] = "";
+    if (vglCurrentProgramDrawable(info, sizeof(info))) return 1;
+    if (bad_draws++ < 40)
+        l_warn("[GL] draw %d skipped: %s (our program %u, linked %d)", draw_no, info, cur_program,
+               cur_program < MAX_PROGS ? prog_linked[cur_program] : -1);
     return 0;
 }
 
