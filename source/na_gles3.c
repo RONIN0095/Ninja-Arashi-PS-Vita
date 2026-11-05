@@ -249,10 +249,20 @@ static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const 
     int frag = shader < MAX_SHADER_IDS ? shader_is_fragment[shader] : 0;
     int changed = 0;
     char *t = na_shaders_translate(src, frag, &changed);
-    if (shaders_seen++ < 4) {
+    if (shaders_seen < 4) {
         l_info("glShaderSource(%u, %s): %u bytes%s", shader, frag ? "fragment" : "vertex",
                (unsigned)pos, t ? ", translated from GLSL ES 3.00" : "");
+        // The source Unity gave and what vitaGL gets, for checking the translation
+        char path[128];
+        snprintf(path, sizeof(path), DATA_PATH "shader%d_%s.txt", shaders_seen, frag ? "frag" : "vert");
+        FILE *f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "// ---- from Unity ----\n%s\n// ---- to vitaGL ----\n%s\n", src, t ? t : "(unchanged)");
+            fclose(f);
+        }
     }
+    if (shaders_seen++ == 4) l_info("glShaderSource: more shaders follow (not logged)");
+    if ((shaders_seen % 50) == 0) l_info("glShaderSource: %d shaders so far", shaders_seen);
     const GLchar *s = t ? t : src;
     GLint len = (GLint)strlen(s);
     glShaderSource(shader, 1, &s, &len);
@@ -919,6 +929,37 @@ static void glUseProgram_na(GLuint p) {
     glUseProgram(p);
 }
 
+// How Unity binds attributes and fills uniforms (the first calls only)
+static int gl_calls_logged = 0;
+#define LOG_CALL(...) do { if (gl_calls_logged < 160) { gl_calls_logged++; l_info("[GL] " __VA_ARGS__); } } while (0)
+
+static void glBindAttribLocation_na(GLuint p, GLuint idx, const GLchar *name) {
+    LOG_CALL("glBindAttribLocation(%u, %u, %s)", p, idx, name);
+    glBindAttribLocation(p, idx, name);
+}
+
+static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
+    GLint r = glGetUniformLocation(p, name);
+    LOG_CALL("glGetUniformLocation(%u, %s) = %d", p, name, r);
+    return r;
+}
+
+static void glUniform4fv_na(GLint loc, GLsizei count, const GLfloat *v) {
+    LOG_CALL("glUniform4fv(%d, %d): %.3f %.3f %.3f %.3f%s", loc, count, v[0], v[1], v[2], v[3],
+             count > 1 ? " ..." : "");
+    glUniform4fv(loc, count, v);
+}
+
+static void glUniformMatrix4fv_na(GLint loc, GLsizei count, GLboolean t, const GLfloat *v) {
+    LOG_CALL("glUniformMatrix4fv(%d, %d): %.3f %.3f %.3f %.3f ...", loc, count, v[0], v[5], v[10], v[15]);
+    glUniformMatrix4fv(loc, count, t, v);
+}
+
+static void glUniform1i_na(GLint loc, GLint v) {
+    LOG_CALL("glUniform1i(%d, %d)", loc, v);
+    glUniform1i(loc, v);
+}
+
 // vitaGL crashes drawing with a program that never linked (no vertex shader attached)
 #define MAX_PROGS 4096
 static uint8_t prog_linked[MAX_PROGS];
@@ -944,6 +985,27 @@ static void glLinkProgram_na(GLuint p) {
     GLint ok = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
     if (p < MAX_PROGS) prog_linked[p] = ok ? 1 : 0;
+
+    // What Unity will see of the first programs: attributes and uniforms
+    static int described = 0;
+    if (ok && described++ < 6) {
+        GLint na = 0, nu = 0;
+        glGetProgramiv(p, 0x8B89, &na); // ACTIVE_ATTRIBUTES
+        glGetProgramiv(p, 0x8B86, &nu); // ACTIVE_UNIFORMS
+        l_info("[GL] program %u: %d attributes, %d uniforms", p, na, nu);
+        for (int i = 0; i < na && i < 16; i++) {
+            char n[64] = "";
+            GLsizei len = 0; GLint size = 0; GLenum type = 0;
+            glGetActiveAttrib(p, i, sizeof(n), &len, &size, &type, n);
+            l_info("[GL]   attribute %d: %s (type 0x%x, size %d) at %d", i, n, type, size, glGetAttribLocation(p, n));
+        }
+        for (int i = 0; i < nu && i < 32; i++) {
+            char n[64] = "";
+            GLsizei len = 0; GLint size = 0; GLenum type = 0;
+            glGetActiveUniform(p, i, sizeof(n), &len, &size, &type, n);
+            l_info("[GL]   uniform %d: %s (type 0x%x, size %d) at %d", i, n, type, size, glGetUniformLocation(p, n));
+        }
+    }
     if (!ok) {
         static int warned = 0;
         if (warned++ < 32) l_warn("[GL] glLinkProgram(%u) failed", p);
@@ -1189,6 +1251,7 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
     E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCompileShader), E(glBindFramebuffer),
+    E(glBindAttribLocation), E(glGetUniformLocation), E(glUniform4fv), E(glUniformMatrix4fv), E(glUniform1i),
     E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
     { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
     { "glUnmapBufferOES", (void *)&glUnmapBuffer_na }, E(glFlushMappedBufferRange),

@@ -379,6 +379,28 @@ static jobject DJ_AllocObject(JNIEnv *env, jclass clazz) {
 
 // Constructors run through jo_java_call(cls, "<init>", sig, obj, args)
 static jobject construct(jclass clazz, DJMethod *m, const jvalue *a, int argc) {
+    if (strcmp(((DJClass *)clazz)->name, "java/lang/String") == 0) {
+        // new String(...) is a real (FalsoJNI) string, not a tracked object
+        // (Unity makes one per frame: they filled the object table)
+        JNIEnv *env = jo_env();
+        if (m && argc >= 1 && strncmp(m->sig, "([B", 3) == 0 && a[0].l) {
+            jsize n = (*env)->GetArrayLength(env, (jarray)a[0].l);
+            jbyte *b = (*env)->GetByteArrayElements(env, (jbyteArray)a[0].l, NULL);
+            char *s = malloc(n + 1);
+            if (b) memcpy(s, b, n);
+            s[b ? n : 0] = 0;
+            jstring r = (*env)->NewStringUTF(env, s);
+            free(s);
+            return r;
+        }
+        if (m && argc >= 1 && strncmp(m->sig, "(Ljava/lang/String;", 19) == 0 && a[0].l) {
+            char *s = jo_jstring_to_utf8((jstring)a[0].l);
+            jstring r = (*env)->NewStringUTF(env, s ? s : "");
+            free(s);
+            return r;
+        }
+        return (*env)->NewStringUTF(env, "");
+    }
     jobject o = new_object_of((DJClass *)clazz);
     if (m && strcmp(m->sig, "()V") != 0)
         jo_java_call(((DJClass *)clazz)->name, "<init>", m->sig, o, a, argc);
