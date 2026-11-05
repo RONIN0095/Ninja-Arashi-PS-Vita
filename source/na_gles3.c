@@ -506,6 +506,16 @@ static int sized_to_unsized(GLenum ifmt, GLenum *format, GLenum *type) {
     }
 }
 
+/*
+ * Unity's Alpha8 textures (fonts, masks) are GL_R8 read through a texture
+ * swizzle (alpha = red), which vitaGL doesn't have: as LUMINANCE their alpha
+ * was 1 and every glyph got a black box. R8 textures are stored as
+ * INTENSITY (U8_RRRR) instead, so red and alpha both hold the value.
+ */
+static GLint single_channel_ifmt(GLenum ifmt, GLenum unsized) {
+    return ifmt == 0x8229 /* R8 */ ? GL_INTENSITY : (GLint)unsized;
+}
+
 static int tex_storage_logged = 0;
 static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
     GLuint tex = bound_texture(target);
@@ -530,7 +540,7 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
             GLsizei lw = w >> l, lh = h >> l;
             if (lw < 1) lw = 1;
             if (lh < 1) lh = 1;
-            glTexImage2D(t, l, format, lw, lh, 0, format, type, NULL);
+            glTexImage2D(t, l, single_channel_ifmt(ifmt, format), lw, lh, 0, ifmt == 0x8229 ? GL_RED : format, type, NULL);
             break; // mipmaps are off (see "Mipmaps" below)
         }
     }
@@ -677,6 +687,7 @@ static void glSamplerParameterf_na(GLuint smp, GLenum pname, GLfloat v) {
 static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
                             GLenum type, const void *data) {
     if (level > 0) return;
+    if (ifmt == 0x8229 /* R8 */ || (ifmt == GL_RED && format == GL_RED)) ifmt = GL_INTENSITY; // see single_channel_ifmt
     glTexImage2D(target, level, ifmt, w, h, border, format, type, unpack_ptr(data));
 }
 
