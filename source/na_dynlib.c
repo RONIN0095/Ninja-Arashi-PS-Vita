@@ -249,7 +249,17 @@ static long sysconf_na(int name) {
  * Files
  */
 static long long lseek64_na(int fd, long long off, int whence) {
-    return lseek(fd, (off_t)off, whence);
+    long long r = lseek(fd, (off_t)off, whence);
+    static int traced = 0;
+    if (fd >= 3 && traced++ < 200) l_info("lseek64(%d, %lld, %d): %lld", fd, off, whence, r);
+    return r;
+}
+
+static long lseek_na(int fd, long off, int whence) {
+    long r = lseek(fd, off, whence);
+    static int traced = 0;
+    if (fd >= 3 && traced++ < 200) l_info("lseek(%d, %ld, %d): %ld", fd, off, whence, r);
+    return r;
 }
 
 typedef struct {
@@ -268,6 +278,7 @@ typedef struct {
 } statfs_bionic;
 
 static int statfs_na(const char *path, statfs_bionic *st) {
+    l_info("statfs(%s)", path ? path : "(null)");
     memset(st, 0, sizeof(*st));
     st->f_type = 0xEF53;
     st->f_bsize = st->f_frsize = 4096;
@@ -978,6 +989,7 @@ so_default_dynlib na_dynlib[] = {
     { "access", (uintptr_t)&access_soloader },
     { "lstat", (uintptr_t)&stat_soloader },
     { "lseek64", (uintptr_t)&lseek64_na },
+    { "lseek", (uintptr_t)&lseek_na },
     { "statfs", (uintptr_t)&statfs_na },
     { "readlink", (uintptr_t)&readlink_na },
     { "link", (uintptr_t)&fail_enosys },
