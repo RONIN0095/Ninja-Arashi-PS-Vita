@@ -21,4 +21,7 @@ void na_input_poll(void);
 /** Answers MotionEvent/KeyEvent getters for our event objects. Returns 1 if handled. */
 int na_input_event_call(const char *name, const char *sig, jobject self, const jvalue *args, int argc, jvalue *r);
 
+/** MotionEvent.obtain(event) and similar static copies. Returns 1 if handled. */
+int na_input_static_call(const char *cls, const char *name, const jvalue *args, int argc, jvalue *r);
+
 #endif // NA_INPUT_H

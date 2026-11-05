@@ -25,6 +25,8 @@ JNIEnv *jo_env(void);
 
 jobject jo_new_object(const char *class_name);
 void jo_free_object(jobject obj);
+/** A copy of one of our objects (same class, same field values). */
+jobject jo_clone_object(jobject obj);
 int jo_is_object(jobject obj);
 const char *jo_class_name(jobject obj);
 

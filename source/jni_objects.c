@@ -185,6 +185,16 @@ jobject jo_new_object(const char *class_name) {
     return new_object_of(c);
 }
 
+jobject jo_clone_object(jobject obj) {
+    if (!jo_is_object(obj)) return NULL;
+    DJObject *o = calloc(1, sizeof(DJObject));
+    memcpy(o, (DJObject *)obj, sizeof(DJObject));
+    sceKernelLockLwMutex(&jo_lock, 1, NULL);
+    objset_add((uintptr_t)o);
+    sceKernelUnlockLwMutex(&jo_lock, 1);
+    return (jobject)o;
+}
+
 void jo_free_object(jobject obj) {
     if (!jo_is_object(obj)) return;
     sceKernelLockLwMutex(&jo_lock, 1, NULL);

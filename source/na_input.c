@@ -197,6 +197,21 @@ void na_input_poll(void) {
 }
 
 /*
+ * MotionEvent.obtain(event) / KeyEvent(event): Unity copies every event it
+ * gets before queueing it; the copy is retired like our own events.
+ */
+int na_input_static_call(const char *cls, const char *name, const jvalue *args, int argc, jvalue *r) {
+    int motion = strcmp(cls, "android/view/MotionEvent") == 0;
+    int key = strcmp(cls, "android/view/KeyEvent") == 0;
+    if ((!motion && !key) || argc != 1 || !jo_is_object(args[0].l)) return 0;
+    if (strcmp(name, "obtain") != 0 && strcmp(name, "obtainNoHistory") != 0 && strcmp(name, "changeAction") != 0)
+        return 0;
+    r->l = jo_clone_object(args[0].l);
+    retire(r->l);
+    return 1;
+}
+
+/*
  * Getters Unity calls on our events (from jo_java_call)
  */
 int na_input_event_call(const char *name, const char *sig, jobject self, const jvalue *args, int argc, jvalue *r) {
@@ -242,8 +257,13 @@ int na_input_event_call(const char *name, const char *sig, jobject self, const j
     else if (!strcmp(name, "getKeyCode")) r->i = jo_get_int(self, "__keycode");
     else if (!strcmp(name, "getScanCode")) r->i = 0;
     else if (!strcmp(name, "getUnicodeChar")) r->i = 0;
-    else if (!strcmp(name, "getDevice")) r->l = jo_new_object("android/view/InputDevice");
+    else if (!strcmp(name, "getDevice")) {
+        static jobject device = NULL;
+        if (!device) device = jo_new_object("android/view/InputDevice");
+        r->l = device;
+    }
     else if (!strcmp(name, "isFromSource")) r->z = (jo_get_int(self, "__source") & args[0].i) == args[0].i;
+    else if (!strcmp(name, "recycle")) { /* retired with the others */ }
     else if (!strcmp(name, "getRepeatCount") || !strcmp(name, "getMetaState") || !strcmp(name, "getFlags") ||
              !strcmp(name, "getHistorySize") || !strcmp(name, "getButtonState") || !strcmp(name, "getEdgeFlags") ||
              !strcmp(name, "getModifiers") || !strcmp(name, "getDisplayId"))

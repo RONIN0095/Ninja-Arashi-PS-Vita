@@ -382,6 +382,8 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
     // Input events (na_input.c)
     if (self && jo_is_object(self) && na_input_event_call(name, sig, self, args, argc, &r))
         return r;
+    if (!self && na_input_static_call(cls, name, args, argc, &r))
+        return r;
     if (strstr(sc, "InputDevice") || strstr(cls, "InputDevice")) {
         if (is(name, "getSources")) r.i = 0x1002 | 0x401 | 0x101;
         else if (is(name, "getName")) r.l = jstr("PS Vita");
