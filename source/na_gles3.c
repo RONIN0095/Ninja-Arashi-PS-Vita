@@ -32,6 +32,7 @@
 #include "na_shaders.h"
 
 static void glBindFramebuffer_na(GLenum target, GLuint fb); // with the screenshot code at the end
+static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h);
 #include "utils/logger.h"
 
 #ifndef GL_MAJOR_VERSION
@@ -556,7 +557,9 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
     if (lw < 1) lw = 1;
     if (lh < 1) lh = 1;
     if (x == 0 && y == 0 && w >= lw && h >= lh) {
+        glGetError();
         glCompressedTexImage2D(target, level, format, w, h, 0, size, data);
+        check_upload("glCompressedTexSubImage2D", format, w, h);
     } else {
         static int warned = 0;
         if (warned++ < 8)
@@ -688,7 +691,9 @@ static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, G
                             GLenum type, const void *data) {
     if (level > 0) return;
     if (ifmt == 0x8229 /* R8 */ || (ifmt == GL_RED && format == GL_RED)) ifmt = GL_INTENSITY; // see single_channel_ifmt
+    glGetError();
     glTexImage2D(target, level, ifmt, w, h, border, format, type, unpack_ptr(data));
+    check_upload("glTexImage2D", ifmt, w, h);
 }
 
 static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
@@ -699,12 +704,32 @@ static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLs
     glTexSubImage2D(target, level, x, y, w, h, format, type, data);
 }
 
+// Texture uploads that fail (out of GPU memory, unsupported format) leave a
+// texture that draws black: report them with the memory left.
+static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h) {
+    GLenum e = glGetError();
+    if (e == GL_NO_ERROR) return;
+    static int reported = 0;
+    if (reported++ < 40)
+        l_warn("[GL] %s(0x%x, %dx%d) failed: 0x%x (free: vram %u KB, ram %u KB, phycont %u KB, newlib %u KB)", what, ifmt,
+               w, h, e, (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024), (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
+               (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024), (unsigned)(vglMemFree(VGL_MEM_EXTERNAL) / 1024));
+}
+
+void na_gl_log_memory(void) {
+    l_info("[GL] free memory: vram %u KB, ram %u KB, phycont %u KB, newlib %u KB",
+           (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024), (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
+           (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024), (unsigned)(vglMemFree(VGL_MEM_EXTERNAL) / 1024));
+}
+
 static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                       GLsizei size, const void *data) {
     if (level > 0) return;
     data = unpack_ptr(data);
     if (!data) return;
+    glGetError();
     glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
+    check_upload("glCompressedTexImage2D", ifmt, w, h);
 }
 
 static void glGenerateMipmap_na(GLenum target) {}

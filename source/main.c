@@ -35,6 +35,7 @@
 #include "na_looper.h"
 
 void na_java_tick(void); // na_java.c
+void na_gl_log_memory(void); // na_gles3.c
 #include "na_unity.h"
 #include "utils/dialog.h"
 #include "utils/glutil.h"
@@ -145,7 +146,10 @@ int main() {
         int swaps_before = na_egl_swap_count;
         int r = na_unity_frame();
         if (frame < 5 || frame % 600 == 0)
+        {
             l_info("Frame %d (nativeRender %d, swaps %d)", frame, r, na_egl_swap_count);
+            na_gl_log_memory();
+        }
         // Unity skips the swap while it has nothing to show: keep the display alive
         if (na_egl_swap_count == swaps_before)
             sceKernelDelayThread(1000);
