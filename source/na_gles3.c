@@ -33,6 +33,7 @@
 
 static void glBindFramebuffer_na(GLenum target, GLuint fb); // with the screenshot code at the end
 static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h);
+static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h);
 #include "utils/logger.h"
 
 #ifndef GL_MAJOR_VERSION
@@ -557,9 +558,11 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
     if (lw < 1) lw = 1;
     if (lh < 1) lh = 1;
     if (x == 0 && y == 0 && w >= lw && h >= lh) {
+        void *converted = convert_etc2(&format, &size, &data, w, h);
         glGetError();
         glCompressedTexImage2D(target, level, format, w, h, 0, size, data);
         check_upload("glCompressedTexSubImage2D", format, w, h);
+        free(converted);
     } else {
         static int warned = 0;
         if (warned++ < 8)
@@ -704,6 +707,36 @@ static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLs
     glTexSubImage2D(target, level, x, y, w, h, format, type, data);
 }
 
+/*
+ * ETC2 without alpha (GL_COMPRESSED_RGB8_ETC2, Unity's format for opaque
+ * textures: backgrounds, scenery) is rejected by vitaGL, which only decodes
+ * ETC2 with EAC alpha: those textures stayed black. Each 8-byte RGB block
+ * gets an 8-byte EAC alpha block in front (base 255, multiplier 0: fully
+ * opaque), and the result goes in as GL_COMPRESSED_RGBA8_ETC2_EAC. sRGB
+ * variants are passed on as their linear formats.
+ * Returns a buffer to free (or NULL if the data is used as is).
+ */
+static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h) {
+    if (*fmt == 0x9279) *fmt = 0x9278; // SRGB8_ALPHA8_ETC2_EAC -> RGBA8_ETC2_EAC
+    if (*fmt == 0x9275) *fmt = 0x9274; // SRGB8_ETC2 -> RGB8_ETC2
+    if (*fmt != 0x9274) return NULL;
+    size_t blocks = (size_t)((w + 3) / 4) * ((h + 3) / 4);
+    if ((size_t)*size < blocks * 8) blocks = *size / 8;
+    uint8_t *out = malloc(blocks * 16);
+    if (!out) return NULL;
+    const uint8_t *in = *data;
+    for (size_t i = 0; i < blocks; i++) {
+        uint8_t *b = &out[i * 16];
+        memset(b, 0, 8);
+        b[0] = 255; // base alpha, multiplier 0 and table 0 in b[1]
+        memcpy(b + 8, &in[i * 8], 8);
+    }
+    *fmt = 0x9278; // GL_COMPRESSED_RGBA8_ETC2_EAC
+    *size = (GLsizei)(blocks * 16);
+    *data = out;
+    return out;
+}
+
 // Texture uploads that fail (out of GPU memory, unsupported format) leave a
 // texture that draws black: report them with the memory left.
 static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h) {
@@ -727,9 +760,11 @@ static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, G
     if (level > 0) return;
     data = unpack_ptr(data);
     if (!data) return;
+    void *converted = convert_etc2(&ifmt, &size, &data, w, h);
     glGetError();
     glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
     check_upload("glCompressedTexImage2D", ifmt, w, h);
+    free(converted);
 }
 
 static void glGenerateMipmap_na(GLenum target) {}
