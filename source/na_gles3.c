@@ -34,6 +34,17 @@
 static void glBindFramebuffer_na(GLenum target, GLuint fb); // with the screenshot code at the end
 static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h);
 static int blend_on = 0; // GL_BLEND, for the draw trace
+static GLuint bound_draw_fb, bound_read_fb; // (screenshot code)
+// Bound 2D textures per unit and texture sizes, for the draw trace
+static GLuint unit_tex[16];
+static int active_unit = 0;
+#define MAX_TEX_INFO 4096
+static struct { uint16_t w, h; uint32_t fmt; } tex_info[MAX_TEX_INFO];
+static void note_texture(GLenum target, GLsizei w, GLsizei h, GLenum fmt) {
+    if (target != 0x0DE1) return; // GL_TEXTURE_2D
+    GLuint t = unit_tex[active_unit];
+    if (t < MAX_TEX_INFO) { tex_info[t].w = w; tex_info[t].h = h; tex_info[t].fmt = fmt; }
+}
 static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h);
 #include "utils/logger.h"
 
@@ -522,6 +533,7 @@ static GLint single_channel_ifmt(GLenum ifmt, GLenum unsized) {
 static int tex_storage_logged = 0;
 static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
     GLuint tex = bound_texture(target);
+    note_texture(target, w, h, ifmt);
     if (tex_storage_logged++ < 64)
         l_info("[GL] glTexStorage2D(tex %u, target 0x%x, %d levels, 0x%x, %dx%d)", tex, target, levels, ifmt, w, h);
     tex_storage *s = storage_for(tex, 1);
@@ -694,6 +706,7 @@ static void glSamplerParameterf_na(GLuint smp, GLenum pname, GLfloat v) {
 static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
                             GLenum type, const void *data) {
     if (level > 0) return;
+    note_texture(target, w, h, ifmt);
     if (ifmt == 0x8229 /* R8 */ || (ifmt == GL_RED && format == GL_RED)) ifmt = GL_INTENSITY; // see single_channel_ifmt
     glGetError();
     glTexImage2D(target, level, ifmt, w, h, border, format, type, unpack_ptr(data));
@@ -759,6 +772,7 @@ void na_gl_log_memory(void) {
 static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                       GLsizei size, const void *data) {
     if (level > 0) return;
+    note_texture(target, w, h, ifmt);
     data = unpack_ptr(data);
     if (!data) return;
     void *converted = convert_etc2(&ifmt, &size, &data, w, h);
@@ -932,6 +946,16 @@ static void glBlitFramebuffer_na(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLi
  * or stencil test against stale values. Ninja Arashi is 2D: Unity orders
  * its sprites and UI itself, so neither test is needed to draw it.
  */
+static void glActiveTexture_na(GLenum unit) {
+    active_unit = (unit - 0x84C0) & 15; // GL_TEXTURE0
+    glActiveTexture(unit);
+}
+
+static void glBindTexture_na(GLenum target, GLuint tex) {
+    if (target == 0x0DE1) unit_tex[active_unit] = tex;
+    glBindTexture(target, tex);
+}
+
 static void glDisable_na(GLenum cap) {
     if (cap == GL_BLEND) blend_on = 0;
     glDisable(cap);
@@ -1025,7 +1049,7 @@ static void glBlendFuncSeparate_na(GLenum sr, GLenum dr, GLenum sa, GLenum da) {
     blend_f[0] = sr; blend_f[1] = dr; blend_f[2] = sa; blend_f[3] = da;
     glBlendFuncSeparate(sr, dr, sa, da);
 }
-#define TRACE_FROM_SWAP 1500 // the menu is up by then (about 50 s in)
+#define TRACE_FROM_SWAP 650 // just after the second screenshot: the menu is up
 #define TRACED_DRAWS 120
 
 static void glUseProgram_na(GLuint p) {
@@ -1229,8 +1253,11 @@ static void traced(const char *what, const char *desc) {
                      cur_vao->vertex_attrib_config[1].format);
         }
     }
-    l_info("[GL] draw %d: %s prog %u, %s, %s, blend %s 0x%x/0x%x 0x%x/0x%x", draw_no, what, cur_program, desc, col,
-           blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3]);
+    GLuint t = unit_tex[0];
+    int ti = t < MAX_TEX_INFO;
+    l_info("[GL] draw %d: %s prog %u, %s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u", draw_no, what,
+           cur_program, desc, col, blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3], t,
+           ti ? tex_info[t].w : 0, ti ? tex_info[t].h : 0, ti ? tex_info[t].fmt : 0, bound_draw_fb);
 }
 
 static void traced_done(void) {
@@ -1361,7 +1388,7 @@ static const gl_entry gl_table[] = {
     E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
     E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
     { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
-    E(glEnable), E(glDisable), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glEnable), E(glDisable), E(glActiveTexture), E(glBindTexture), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
