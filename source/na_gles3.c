@@ -925,6 +925,20 @@ static void glBlitFramebuffer_na(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLi
     glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, filter);
 }
 
+/*
+ * Depth and stencil tests are off (experiment, hardware run 35): the menu
+ * shows only strips of its big panels, as if most fragments failed a depth
+ * or stencil test against stale values. Ninja Arashi is 2D: Unity orders
+ * its sprites and UI itself, so neither test is needed to draw it.
+ */
+static void glEnable_na(GLenum cap) {
+    if (cap == GL_DEPTH_TEST || cap == GL_STENCIL_TEST) {
+        glDisable(cap);
+        return;
+    }
+    glEnable(cap);
+}
+
 static void glColorMaski_na(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
     if (i == 0) glColorMask(r, g, b, a);
 }
@@ -1314,7 +1328,7 @@ static const gl_entry gl_table[] = {
     E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
     E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
     { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
-    E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glEnable), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
