@@ -23,6 +23,7 @@
  */
 
 #include "na_modules.h"
+#include "na_aaudio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,6 +155,7 @@ NaLib *na_module_for_addr(uintptr_t addr) {
 static const char *system_libs[] = {
     "libc.so", "libm.so", "libdl.so", "liblog.so", "libz.so", "libandroid.so",
     "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libOpenSLES.so", "libmain.so",
+    "libaaudio.so", // na_aaudio.c
 };
 #define N_SYSTEM_LIBS (sizeof(system_libs) / sizeof(system_libs[0]))
 static char system_handles[N_SYSTEM_LIBS];
@@ -161,7 +163,7 @@ static char system_handles[N_SYSTEM_LIBS];
 // Libraries the game probes but that must look absent, so it takes another
 // path (AAudio -> OpenSL ES, Vulkan -> GLES, ...).
 static const char *absent_libs[] = {
-    "libaaudio.so", "libvulkan.so", "libmediandk.so", "libcamera2ndk.so",
+    "libvulkan.so", "libmediandk.so", "libcamera2ndk.so",
     "libnativewindow.so", "libapplovin-native-crash-reporter.so", "libswappy.so",
 };
 
@@ -183,8 +185,19 @@ void *na_dlopen(const char *filename, int flags) {
     for (int i = 0; i < NA_LIB_COUNT; i++) {
         if (strcmp(base, na_libs[i].soname) == 0) {
             if (!na_libs[i].loaded) break;
+            int first = !na_libs[i].initialized;
             na_module_init((NaLibId)i);
             l_info("dlopen(%s) -> %s", filename, na_libs[i].soname);
+            // System.loadLibrary() calls JNI_OnLoad; libil2cpp needs it to
+            // know the Java VM (AndroidJavaObject & co.)
+            if (first && i == NA_LIB_IL2CPP) {
+                int (*onload)(void *, void *) = (void *)so_symbol(&na_libs[i].mod, "JNI_OnLoad");
+                if (onload) {
+                    extern char jvm[];
+                    int v = onload(jvm, NULL);
+                    l_info("libil2cpp JNI_OnLoad: 0x%x", v);
+                }
+            }
             return &na_libs[i];
         }
     }
@@ -233,6 +246,8 @@ static void *lookup_global(const char *symbol) {
     if (p) return p;
     p = na_gl_get_proc(symbol);
     if (p) return p;
+    p = na_aaudio_lookup(symbol);
+    if (p) return p;
     for (int i = 0; i < NA_LIB_COUNT; i++) {
         uintptr_t s = na_module_symbol((NaLibId)i, symbol);
         if (s) return (void *)s;
@@ -251,6 +266,7 @@ void *na_dlsym(void *handle, const char *symbol) {
     } else if (handle >= (void *)&system_handles[0] && handle < (void *)&system_handles[N_SYSTEM_LIBS]) {
         p = na_dynlib_lookup(symbol);
         if (!p) p = na_gl_get_proc(symbol);
+        if (!p) p = na_aaudio_lookup(symbol);
     } else {
         // RTLD_DEFAULT, RTLD_NEXT or dlopen(NULL)
         p = lookup_global(symbol);

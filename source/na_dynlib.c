@@ -594,6 +594,8 @@ static void handler_returned(void) {
     *(volatile int *)0 = 0;
 }
 
+static volatile uint32_t last_fault_pc, last_fault_addr;
+
 static void abort_handler(KuKernelAbortContext *ctx) {
     int sig = BIONIC_SIGSEGV;
     void *h = sig_actions[sig].handler;
@@ -601,8 +603,13 @@ static void abort_handler(KuKernelAbortContext *ctx) {
         sig = BIONIC_SIGBUS;
         h = sig_actions[sig].handler;
     }
-    if ((uintptr_t)h <= 1) {
-        // Nobody handles it: let the fault happen again without us (core dump)
+    // Only IL2CPP's Boehm GC handles faults on purpose (GC_find_limit).
+    // Unity's crash reporter would only hide where the crash happened, so
+    // any other fault is left to the system: real crash, useful core dump.
+    NaLib *owner = na_module_for_addr((uintptr_t)h & ~1u);
+    if ((uintptr_t)h <= 1 || !owner || owner != &na_libs[NA_LIB_IL2CPP]) {
+        last_fault_pc = ctx->pc;
+        last_fault_addr = ctx->FAR;
         kuKernelReleaseAbortHandler();
         abort_handler_on = 0;
         return;

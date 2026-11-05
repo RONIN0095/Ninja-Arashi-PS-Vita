@@ -97,6 +97,7 @@ endif()
 
 set(SOURCES
     source/main.c
+    source/na_aaudio.c
     source/na_android.c
     source/na_apk.c
     source/na_dynlib.c
