@@ -59,10 +59,14 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
     FILE* ret = fopen(filename, mode);
 #endif
 
-    if (ret)
-        l_io("fopen(%s, %s): %p", filename, mode, ret);
-    else
-        l_warn("fopen(%s, %s): %p", filename, mode, ret);
+    if (ret) {
+        if (strncmp(filename, "app0:/cpu", 9) != 0) l_io("fopen(%s, %s): %p", filename, mode, ret);
+    } else {
+        // Unity polls the /sys cpu files every frame: report missing ones once
+        static int sys_misses = 0;
+        if (strncmp(filename, "/sys/", 5) != 0 || sys_misses++ < 4)
+            l_warn("fopen(%s, %s): %p", filename, mode, ret);
+    }
 
     return ret;
 }
