@@ -95,6 +95,25 @@ int main() {
     sceIoMkdir(DATA_PATH "cache", 0777);
     sceIoMkdir(DATA_PATH "external", 0777);
     sceIoMkdir("ux0:data/shader_cache", 0777);
+    // The shader cache (vitaGL's pack, failures included) is only valid for one
+    // version of the shader translation: start over when it changes
+    {
+        static const char version[] = "translator-2";
+        char old[32] = "";
+        SceUID f = sceIoOpen(DATA_PATH "shader_cache_version.txt", SCE_O_RDONLY, 0);
+        if (f >= 0) {
+            sceIoRead(f, old, sizeof(old) - 1);
+            sceIoClose(f);
+        }
+        if (strcmp(old, version) != 0) {
+            sceIoRemove("ux0:data/shader_cache/NARS00001.pack");
+            f = sceIoOpen(DATA_PATH "shader_cache_version.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+            if (f >= 0) {
+                sceIoWrite(f, version, strlen(version));
+                sceIoClose(f);
+            }
+        }
+    }
     l_info("Ninja Arashi loader starting.");
 
     if (!file_exists(DATA_PATH "base.apk"))

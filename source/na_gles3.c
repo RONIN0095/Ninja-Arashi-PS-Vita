@@ -1417,7 +1417,16 @@ void na_gl_screenshot(int n) {
     free(px);
 }
 
+// The runtime shader compiler's messages (vitaGL only logs them in debug builds)
+static void shark_log(const char *msg, shark_log_level level, int line) {
+    static int lines = 0;
+    if (level == SHARK_LOG_INFO || lines >= 400) return;
+    lines++;
+    l_warn("[shark] %s: %s (line %d)", level == SHARK_LOG_ERROR ? "error" : "warning", msg, line);
+}
+
 void na_gles3_init(void) {
+    shark_install_log_cb(shark_log);
     // ETC2 textures (most of the game) are decoded and re-compressed to DXT5
     // instead of being stored as RGBA8 (4x the memory).
     glHint(GL_TEXTURE_COMPRESSION_HINT, GL_NICEST);

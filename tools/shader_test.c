@@ -61,7 +61,10 @@ static int self_test(void) {
     fails += expect(v, "varying highp int vs_INDEX0;", 1);
     fails += expect(f, "varying highp vec2 vs_TEXCOORD0;", 1);
     fails += expect(f, "#define SV_Target0 gl_FragColor", 1);
-    fails += expect(f, "vec4 texture(sampler2D s, vec2 c)", 1);
+    fails += expect(f, "vec4 vgl_texture(sampler2D s, vec2 c)", 1);
+    fails += expect(f, "vgl_texture(_MainTex, vs_TEXCOORD0)", 1);
+    fails += expect(f, "vgl_textureLod(_MainTex", 1);
+    fails += expect(f, " texture(", 0);
     fails += expect(f, "layout", 0);
     free(v);
     free(f);

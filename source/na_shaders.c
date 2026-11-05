@@ -21,8 +21,13 @@
  *  - Remaining layout(...) qualifiers are removed.
  *  - Global "in"/"out" become attribute/varying (vertex) or varying
  *    (fragment); the first fragment output becomes gl_FragColor.
- *  - texture()/textureLod()/roundEven() are provided as overloads in a
- *    prelude at the top (CG allows overloading by sampler type).
+ *  - texture()/textureLod() become vgl_texture()/vgl_textureLod(), which a
+ *    prelude at the top provides as overloads (CG allows overloading by
+ *    sampler type; "texture" itself is a reserved word in CG, so a function
+ *    of that name doesn't compile). roundEven() is a macro there.
+ *  - Unity's own (non-hlslcc) shaders hide in/out in macros
+ *    ("#define ATTRIBUTE_IN in", "#define DECLARE_FRAG_COLOR out vec4
+ *    fragColor"): those #define bodies are rewritten the same way.
  *
  * na_shaders_translate() is plain C without Vita dependencies, so it can be
  * tested on a PC against the shaders extracted from the game
@@ -61,12 +66,85 @@ static const char *PRELUDE_COMMON =
     "#define uvec2 ivec2\n"
     "#define uvec3 ivec3\n"
     "#define uvec4 ivec4\n"
-    "vec4 texture(sampler2D s, vec2 c) { return tex2D(s, c); }\n"
-    "vec4 texture(sampler2D s, vec2 c, float b) { return tex2Dbias(s, vec4(c, 0.0, b)); }\n"
-    "vec4 texture(samplerCube s, vec3 c) { return texCUBE(s, c); }\n"
-    "vec4 texture(samplerCube s, vec3 c, float b) { return texCUBEbias(s, vec4(c, b)); }\n"
-    "vec4 textureLod(sampler2D s, vec2 c, float l) { return tex2Dlod(s, vec4(c, 0.0, l)); }\n"
-    "vec4 textureLod(samplerCube s, vec3 c, float l) { return texCUBElod(s, vec4(c, l)); }\n";
+    "vec4 vgl_texture(sampler2D s, vec2 c) { return tex2D(s, c); }\n"
+    "vec4 vgl_texture(sampler2D s, vec2 c, float b) { return tex2Dbias(s, vec4(c, 0.0, b)); }\n"
+    "vec4 vgl_texture(samplerCube s, vec3 c) { return texCUBE(s, c); }\n"
+    "vec4 vgl_texture(samplerCube s, vec3 c, float b) { return texCUBEbias(s, vec4(c, b)); }\n"
+    "vec4 vgl_textureLod(sampler2D s, vec2 c, float l) { return tex2Dlod(s, vec4(c, 0.0, l)); }\n"
+    "vec4 vgl_textureLod(samplerCube s, vec3 c, float l) { return texCUBElod(s, vec4(c, l)); }\n";
+
+static int starts_with_word(const char *s, const char *w);
+
+static int ident_char(char c) { return isalnum((unsigned char)c) || c == '_'; }
+
+// Writes line to out with the functions texture/textureLod renamed to
+// vgl_texture/vgl_textureLod: as calls ("texture (") and as a #define body.
+static void put_renamed(sbuf *out, const char *line) {
+    static const char *names[] = { "textureLod", "texture" };
+    int is_define = strncmp(line + strspn(line, " \t"), "#define", 7) == 0;
+    const char *p = line;
+    while (*p) {
+        int done = 0;
+        for (int i = 0; i < 2 && !done; i++) {
+            size_t n = strlen(names[i]);
+            if (strncmp(p, names[i], n) != 0 || (p > line && ident_char(p[-1])) || ident_char(p[n])) continue;
+            const char *a = p + n;
+            while (*a == ' ' || *a == '\t') a++;
+            if (*a == '(' || (is_define && *a == 0)) {
+                sb_puts(out, "vgl_");
+                sb_put(out, p, n);
+                p += n;
+                done = 1;
+            }
+        }
+        if (!done) sb_put(out, p++, 1);
+    }
+    sb_puts(out, "\n");
+}
+
+// "#define NAME in|out ..." (Unity's own shaders): 1 if handled.
+static int put_inout_define(sbuf *out, const char *t, int is_fragment) {
+    if (strncmp(t, "#define", 7) != 0 || (t[7] != ' ' && t[7] != '\t')) return 0;
+    const char *name = t + 7;
+    while (*name == ' ' || *name == '\t') name++;
+    const char *ne = name;
+    while (ident_char(*ne)) ne++;
+    if (ne == name || *ne == '(') return 0;
+    const char *body = ne;
+    while (*body == ' ' || *body == '\t') body++;
+    int is_in = starts_with_word(body, "in") || strcmp(body, "in") == 0;
+    int is_out = starts_with_word(body, "out") || strcmp(body, "out") == 0;
+    if (!is_in && !is_out) return 0;
+    const char *rest = body + (is_in ? 2 : 3);
+    while (*rest == ' ' || *rest == '\t') rest++;
+
+    sb_puts(out, "#define ");
+    sb_put(out, name, ne - name);
+    sb_puts(out, " ");
+    if (is_in) {
+        sb_puts(out, is_fragment ? "varying" : "attribute");
+    } else if (!is_fragment) {
+        sb_puts(out, "varying");
+    } else if (*rest) {
+        // "out vec4 fragColor": the declaration becomes a dummy, the name gl_FragColor
+        const char *v = rest + strlen(rest);
+        while (v > rest && (v[-1] == ' ' || v[-1] == '\t' || v[-1] == ';')) v--;
+        const char *vb = v;
+        while (vb > rest && ident_char(vb[-1])) vb--;
+        sb_puts(out, "vec4 vgl_unused_frag_output\n#define ");
+        sb_put(out, vb, v - vb);
+        sb_puts(out, " gl_FragColor\n");
+        return 1;
+    } else {
+        sb_puts(out, ""); // a bare "out" qualifier on a fragment output: dropped
+    }
+    if (*rest) {
+        sb_puts(out, " ");
+        sb_puts(out, rest);
+    }
+    sb_puts(out, "\n");
+    return 1;
+}
 
 // Removes every "layout(...)" in a line (also inside #define bodies).
 static void strip_layout(char *line) {
@@ -159,6 +237,12 @@ char *na_shaders_translate(const char *src, int is_fragment, int *changed) {
         t = line;
         while (*t == ' ' || *t == '\t') t++;
 
+        if (put_inout_define(&out, t, is_fragment)) {
+            if (changed) *changed = 1;
+            free(line);
+            continue;
+        }
+
         // Interpolation qualifiers have no GLSL ES 1.00 equivalent
         char *q = t;
         while (starts_with_word(q, "flat") || starts_with_word(q, "smooth") ||
@@ -169,8 +253,7 @@ char *na_shaders_translate(const char *src, int is_fragment, int *changed) {
 
         if (starts_with_word(q, "in") && strchr(q, ';') && !strchr(q, '(')) {
             sb_puts(&out, is_fragment ? "varying" : "attribute");
-            sb_puts(&out, q + 2);
-            sb_puts(&out, "\n");
+            put_renamed(&out, q + 2);
             if (changed) *changed = 1;
         } else if (starts_with_word(q, "out") && strchr(q, ';') && !strchr(q, '(')) {
             if (is_fragment) {
@@ -192,8 +275,7 @@ char *na_shaders_translate(const char *src, int is_fragment, int *changed) {
             }
             if (changed) *changed = 1;
         } else {
-            sb_puts(&out, line);
-            sb_puts(&out, "\n");
+            put_renamed(&out, line);
         }
         free(line);
     }
