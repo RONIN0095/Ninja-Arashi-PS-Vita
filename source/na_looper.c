@@ -141,10 +141,19 @@ jobject na_proxy_invoke(jobject proxy, const char *iface, const char *method, co
     // the interface the proxy was made for, if it is the one we are calling
     jclass cls = (jclass)jo_get_obj(proxy, "__iface");
     if (!cls || strcmp((const char *)cls, iface) != 0) cls = (*env)->FindClass(env, iface);
-    jobject m = jo_new_object("java/lang/reflect/Method");
-    jo_set_long(m, "__mid", (jlong)(uintptr_t)(*env)->GetMethodID(env, cls, method, sig));
-    jo_set_string(m, "__name", method);
-    jo_set_obj(m, "__class", (jobject)cls);
+    // Method objects are cached: one per interface method (they were leaking one per frame)
+    static struct { jclass cls; const char *name; jobject m; } methods[32];
+    static int n_methods = 0;
+    jobject m = NULL;
+    for (int i = 0; i < n_methods; i++)
+        if (methods[i].cls == cls && strcmp(methods[i].name, method) == 0) m = methods[i].m;
+    if (!m) {
+        m = jo_new_object("java/lang/reflect/Method");
+        jo_set_long(m, "__mid", (jlong)(uintptr_t)(*env)->GetMethodID(env, cls, method, sig));
+        jo_set_string(m, "__name", method);
+        jo_set_obj(m, "__class", (jobject)cls);
+        if (n_methods < 32) methods[n_methods++] = (typeof(methods[0])){ cls, method, m };
+    }
     jclass bridge = (*env)->FindClass(env, "bitter/jnibridge/JNIBridge");
     return invoke(env, bridge, ptr, cls, m, make_args(env, args, argc));
 }
@@ -201,6 +210,8 @@ static void dispatch(queued *m) {
         jobject r = m->msg ? jo_get_obj(m->msg, "callback") : NULL;
         if (r) na_proxy_invoke(r, "java/lang/Runnable", "run", "()V", NULL, 0);
     }
+    // Messages are recycled once handled, as on Android
+    if (m->msg && jo_is_object(m->msg)) jo_free_object(m->msg);
 }
 
 // Runs due messages and frame callbacks. Returns microseconds until the next event.
@@ -235,6 +246,7 @@ static uint64_t service(looper *l) {
         l->next_frame_us = t + 16666;
         jobject a[1] = { boxed_long((jlong)t * 1000) };
         for (int i = 0; i < n; i++) na_proxy_invoke(cbs[i], "android/view/Choreographer$FrameCallback", "doFrame", "(J)V", a, 1);
+        jo_free_object(a[0]);
     }
     if (l->n_frame_cbs) {
         uint64_t f = l->next_frame_us > t ? l->next_frame_us - t : 0;

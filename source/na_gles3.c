@@ -303,6 +303,132 @@ static GLboolean glIsVertexArray_na(GLuint a) { return a != 0; }
 static void glProgramParameteri_na(GLuint p, GLenum pname, GLint v) {}
 
 /*
+ * Buffer targets vitaGL doesn't have
+ *
+ * vitaGL knows ARRAY, ELEMENT_ARRAY and UNIFORM buffers. Unity creates and
+ * fills its vertex and index buffers through GL_COPY_WRITE_BUFFER (so the
+ * bound VAO is left alone): vitaGL rejected those calls, the buffers never
+ * got memory, and draws read their indices from address 0 (GPU crash).
+ * Bindings of the other targets are kept here; operations on them run with
+ * the buffer briefly bound as GL_ARRAY_BUFFER (which no VAO captures until
+ * glVertexAttribPointer).
+ */
+extern uint32_t vertex_array_unit; // vitaGL buffers.c
+
+typedef struct { // vitaGL's vbo (shared.h): only the leading fields
+    void *ptr;
+    int32_t size;
+} vgl_vbo;
+
+#define N_EXTRA_TARGETS 10
+static const GLenum extra_targets[N_EXTRA_TARGETS] = {
+    0x8F36, 0x8F37,         // COPY_READ, COPY_WRITE
+    0x88EB, 0x88EC,         // PIXEL_PACK, PIXEL_UNPACK
+    0x8C8E, 0x8F3F, 0x90EE, // TRANSFORM_FEEDBACK, DRAW_INDIRECT, DISPATCH_INDIRECT
+    0x90D2, 0x92C0, 0x8C2A, // SHADER_STORAGE, ATOMIC_COUNTER, TEXTURE_BUFFER
+};
+static GLuint extra_bound[N_EXTRA_TARGETS];
+
+static int extra_index(GLenum target) {
+    for (int i = 0; i < N_EXTRA_TARGETS; i++)
+        if (extra_targets[i] == target) return i;
+    return -1;
+}
+
+#define PIXEL_UNPACK_IDX 3
+
+static void glBindBuffer_na(GLenum target, GLuint buffer) {
+    int i = extra_index(target);
+    if (i >= 0) extra_bound[i] = buffer;
+    else glBindBuffer(target, buffer);
+}
+
+static void glDeleteBuffers_na(GLsizei n, const GLuint *ids) {
+    for (int k = 0; k < n; k++)
+        for (int i = 0; i < N_EXTRA_TARGETS; i++)
+            if (extra_bound[i] == ids[k]) extra_bound[i] = 0;
+    glDeleteBuffers(n, ids);
+}
+
+// Runs op with target's buffer bound as GL_ARRAY_BUFFER if target is one of ours.
+#define WITH_TARGET(target, op) do { \
+        int i_ = extra_index(target); \
+        if (i_ < 0) { op(target); break; } \
+        uint32_t saved_ = vertex_array_unit; \
+        vertex_array_unit = extra_bound[i_]; \
+        op(GL_ARRAY_BUFFER); \
+        vertex_array_unit = saved_; \
+    } while (0)
+
+static void glBufferData_na(GLenum target, GLsizei size, const void *data, GLenum usage) {
+#define OP(t) glBufferData(t, size, data, usage)
+    WITH_TARGET(target, OP);
+#undef OP
+}
+
+static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, const void *data) {
+#define OP(t) glBufferSubData(t, off, size, data)
+    WITH_TARGET(target, OP);
+#undef OP
+}
+
+static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
+    void *r = NULL;
+#define OP(t) r = glMapBufferRange(t, off, len, access)
+    WITH_TARGET(target, OP);
+#undef OP
+    return r;
+}
+
+static GLboolean glUnmapBuffer_na(GLenum target) {
+    GLboolean r = GL_FALSE;
+#define OP(t) r = glUnmapBuffer(t)
+    WITH_TARGET(target, OP);
+#undef OP
+    return r;
+}
+
+static void glFlushMappedBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len) {
+#define OP(t) glFlushMappedBufferRange(t, off, len)
+    WITH_TARGET(target, OP);
+#undef OP
+}
+
+static void glGetBufferParameteriv_na(GLenum target, GLenum pname, GLint *params) {
+#define OP(t) glGetBufferParameteriv(t, pname, params)
+    WITH_TARGET(target, OP);
+#undef OP
+}
+
+static GLuint buffer_bound_to(GLenum target) {
+    int i = extra_index(target);
+    if (i >= 0) return extra_bound[i];
+    if (target == GL_ARRAY_BUFFER) return vertex_array_unit;
+    return 0;
+}
+
+static void glCopyBufferSubData_na(GLenum rt, GLenum wt, GLintptr roff, GLintptr woff, GLsizeiptr size) {
+    vgl_vbo *src = (vgl_vbo *)buffer_bound_to(rt);
+    GLuint dst = buffer_bound_to(wt);
+    if (!src || !src->ptr || !dst || roff + size > src->size) {
+        static int warned = 0;
+        if (warned++ < 8) l_warn("glCopyBufferSubData(0x%x -> 0x%x, %d bytes): no source/destination", rt, wt, (int)size);
+        return;
+    }
+    uint32_t saved = vertex_array_unit;
+    vertex_array_unit = dst;
+    glBufferSubData(GL_ARRAY_BUFFER, woff, size, (const uint8_t *)src->ptr + roff);
+    vertex_array_unit = saved;
+}
+
+// Texture uploads read from the bound PIXEL_UNPACK buffer when there is one
+static const void *unpack_ptr(const void *data) {
+    vgl_vbo *b = (vgl_vbo *)extra_bound[PIXEL_UNPACK_IDX];
+    if (!b) return data;
+    return b->ptr ? (const uint8_t *)b->ptr + (uintptr_t)data : NULL;
+}
+
+/*
  * Textures: immutable storage on top of glTexImage2D
  */
 typedef struct {
@@ -401,6 +527,8 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
 static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
                                          GLenum format, GLsizei size, const void *data) {
     if (level > 0) return; // mipmaps are off
+    data = unpack_ptr(data);
+    if (!data) return;
     tex_storage *s = storage_for(bound_texture(target), 0);
     GLsizei lw = s ? s->w >> level : w, lh = s ? s->h >> level : h;
     if (lw < 1) lw = 1;
@@ -537,18 +665,22 @@ static void glSamplerParameterf_na(GLuint smp, GLenum pname, GLfloat v) {
 static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
                             GLenum type, const void *data) {
     if (level > 0) return;
-    glTexImage2D(target, level, ifmt, w, h, border, format, type, data);
+    glTexImage2D(target, level, ifmt, w, h, border, format, type, unpack_ptr(data));
 }
 
 static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
                                GLenum type, const void *data) {
     if (level > 0) return;
+    data = unpack_ptr(data);
+    if (!data) return;
     glTexSubImage2D(target, level, x, y, w, h, format, type, data);
 }
 
 static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                       GLsizei size, const void *data) {
     if (level > 0) return;
+    data = unpack_ptr(data);
+    if (!data) return;
     glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
 }
 
@@ -748,11 +880,6 @@ static void glGetUniformiv_na(GLuint p, GLint loc, GLint *params) { *params = 0;
  * first draws of the game scene are also logged one by one and followed by
  * glFinish, so a crash that gets past the checks still names its draw.
  */
-typedef struct { // vitaGL's vbo (shared.h): only the leading fields
-    void *ptr;
-    int32_t size;
-} vgl_vbo;
-
 typedef struct {
     uint16_t streamIndex, offset;
     uint8_t format, componentCount;
@@ -781,7 +908,7 @@ extern volatile int na_egl_swap_count; // na_egl.c
 static GLuint cur_program = 0;
 static int draw_no = 0, draws_traced = 0, bad_draws = 0;
 #define TRACE_FROM_SWAP 3   // the game scene starts after the third swap
-#define TRACED_DRAWS 300
+#define TRACED_DRAWS 150
 
 static void glUseProgram_na(GLuint p) {
     cur_program = p;
@@ -961,7 +1088,7 @@ static GLboolean glIsSync_na(void *sync) { return sync != NULL; }
 
 STUB(glTexImage3D) STUB(glTexSubImage3D) STUB(glTexStorage3D) STUB(glCompressedTexImage3D)
 STUB(glCompressedTexSubImage3D) STUB(glFramebufferTextureLayer) STUB(glFramebufferTexture3D)
-STUB(glCopyBufferSubData) STUB(glCopyImageSubData) STUB(glTexBuffer) STUB(glTexStorage2DMultisample)
+STUB(glCopyImageSubData) STUB(glTexBuffer) STUB(glTexStorage2DMultisample)
 STUB(glTexStorage3DMultisample) STUB(glTexImage2DMultisample) STUB(glFramebufferTexture2DMultisample)
 STUB(glResolveMultisampleFramebuffer) STUB(glTexPageCommitment) STUB(glTextureView)
 STUB(glGetTextureParameteriv) STUB(glDispatchCompute) STUB(glDispatchComputeIndirect)
@@ -1010,6 +1137,11 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
     E(glDrawElementsInstanced), E(glUseProgram),
+    E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
+    { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
+    { "glUnmapBufferOES", (void *)&glUnmapBuffer_na }, E(glFlushMappedBufferRange),
+    { "glFlushMappedBufferRangeEXT", (void *)&glFlushMappedBufferRange_na }, E(glGetBufferParameteriv),
+    E(glCopyBufferSubData),
     { "glDrawElementsBaseVertexEXT", (void *)&glDrawElementsBaseVertex_na },
     { "glDrawElementsBaseVertexOES", (void *)&glDrawElementsBaseVertex_na },
     { "glDrawArraysInstancedEXT", (void *)&glDrawArraysInstanced_na },
@@ -1024,7 +1156,6 @@ static const gl_entry gl_table[] = {
     S(glTexStorage3DEXT, glTexStorage3D), S(glCompressedTexImage3D, glCompressedTexImage3D),
     S(glCompressedTexSubImage3D, glCompressedTexSubImage3D),
     S(glFramebufferTextureLayer, glFramebufferTextureLayer), S(glFramebufferTexture3D, glFramebufferTexture3D),
-    S(glCopyBufferSubData, glCopyBufferSubData),
     S(glCopyImageSubData, glCopyImageSubData), S(glCopyImageSubDataEXT, glCopyImageSubData),
     S(glCopyImageSubDataOES, glCopyImageSubData),
     S(glTexBuffer, glTexBuffer), S(glTexBufferEXT, glTexBuffer),
