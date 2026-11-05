@@ -32,6 +32,7 @@
 #include "jni_objects.h"
 #include "na_android.h"
 #include "na_modules.h"
+#include "na_apk.h"
 #include "utils/dialog.h"
 #include "utils/logger.h"
 
@@ -92,6 +93,10 @@ static jobject surface;
 
 void na_unity_start(void) {
     env = jo_env();
+
+    // IL2CPP copies Managed/ from the APK to files/il2cpp/ on first start;
+    // that copy fails here, so it is done up front
+    na_apk_extract_prefix("assets/bin/Data/Managed/", DATA_PATH "files/il2cpp/");
 
     // libunity.so's constructors run when "libmain" loads it
     na_module_init(NA_LIB_UNITY);

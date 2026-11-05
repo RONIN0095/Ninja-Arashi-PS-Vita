@@ -350,3 +350,26 @@ const char *na_apk_map_path(const char *path, char *buf, size_t buflen) {
     sceKernelUnlockLwMutex(&map_lock, 1);
     return buf;
 }
+
+int na_apk_extract_prefix(const char *prefix, const char *out_dir) {
+    if (!map_lock_ready) {
+        sceKernelCreateLwMutex(&map_lock, "apk_map", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
+        map_lock_ready = 1;
+    }
+    sceKernelLockLwMutex(&map_lock, 1, NULL);
+    int n_done = 0;
+    if (load_directory()) {
+        size_t pl = strlen(prefix);
+        for (int i = 0; i < n_entries; i++) {
+            if (strncmp(entries[i].name, prefix, pl) != 0) continue;
+            char out[512];
+            snprintf(out, sizeof(out), "%s%s", out_dir, entries[i].name + pl);
+            struct stat st;
+            if (stat(out, &st) == 0 && (uint32_t)st.st_size == entries[i].size) continue;
+            l_info("[apk] %s -> %s", entries[i].name, out);
+            if (extract(&entries[i], out) == 0) n_done++;
+        }
+    }
+    sceKernelUnlockLwMutex(&map_lock, 1);
+    return n_done;
+}

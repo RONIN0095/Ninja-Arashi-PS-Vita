@@ -347,6 +347,47 @@ static int truncate_na(const char *path, long len) {
     return r;
 }
 
+/*
+ * Tracing of the first file reads/writes (to see how Unity copies files)
+ */
+static int io_trace_left = 300;
+
+static long read_na(int fd, void *buf, size_t n) {
+    long r = read(fd, buf, n);
+    if (fd >= 3 && io_trace_left > 0) { io_trace_left--; l_info("read(%d, %u): %ld", fd, (unsigned)n, r); }
+    return r;
+}
+
+static long write_na(int fd, const void *buf, size_t n) {
+    long r = write(fd, buf, n);
+    if (fd >= 3 && io_trace_left > 0) { io_trace_left--; l_info("write(%d, %u): %ld", fd, (unsigned)n, r); }
+    return r;
+}
+
+static int rename_na(const char *a, const char *b) {
+    int r = rename(a, b);
+    l_info("rename(%s, %s): %d", a, b, r);
+    return r;
+}
+
+static int mkdir_na(const char *p, int mode) {
+    int r = mkdir(p, mode);
+    if (io_trace_left > 0) { io_trace_left--; l_info("mkdir(%s): %d", p, r); }
+    return r;
+}
+
+static int unlink_na(const char *p) {
+    int r = unlink(p);
+    if (io_trace_left > 0) { io_trace_left--; l_info("unlink(%s): %d", p, r); }
+    return r;
+}
+
+static int rmdir_na(const char *p) {
+    int r = rmdir(p);
+    if (io_trace_left > 0) { io_trace_left--; l_info("rmdir(%s): %d", p, r); }
+    return r;
+}
+
 static int readlink_na(const char *path, char *buf, size_t sz) {
     l_debug("readlink(%s): not supported", path);
     errno = EINVAL;
@@ -946,6 +987,12 @@ so_default_dynlib na_dynlib[] = {
     { "futimens", (uintptr_t)&ret0 },
     { "utimes", (uintptr_t)&ret0 },
     { "sendfile", (uintptr_t)&sendfile_na },
+    { "read", (uintptr_t)&read_na },
+    { "write", (uintptr_t)&write_na },
+    { "rename", (uintptr_t)&rename_na },
+    { "mkdir", (uintptr_t)&mkdir_na },
+    { "unlink", (uintptr_t)&unlink_na },
+    { "rmdir", (uintptr_t)&rmdir_na },
     { "ftruncate", (uintptr_t)&ftruncate_na },
     { "truncate", (uintptr_t)&truncate_na },
     { "dup2", (uintptr_t)&fail_enosys },

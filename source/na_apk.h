@@ -28,4 +28,7 @@ void *na_apk_read(const char *name, size_t *size);
  */
 const char *na_apk_map_path(const char *path, char *buf, size_t buflen);
 
+/** Extracts every APK entry starting with prefix into out_dir (+ rest of the name). */
+int na_apk_extract_prefix(const char *prefix, const char *out_dir);
+
 #endif // NA_APK_H
