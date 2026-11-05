@@ -19,6 +19,7 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
 #include <stdio.h>
 #include <sys/dirent.h>
 #include <sys/syslimits.h>
@@ -40,32 +41,39 @@ extern "C" {
 #define DT_WHT 14
 #endif
 
-typedef struct __attribute__((__packed__)) stat64_bionic {
-    unsigned long long st_dev;
-    unsigned char __pad0[4];
-    unsigned long __st_ino;
-    unsigned int st_mode;
-    nlink_t st_nlink;
-    uid_t st_uid;
-    gid_t st_gid;
-    unsigned long long st_rdev;
-    unsigned char __pad3[4];
-    long long st_size;
-    unsigned long st_blksize;
-    unsigned long long st_blocks;
-    struct timespec st_atim;
-    struct timespec st_mtim;
-    struct timespec st_ctim;
-    unsigned long long st_ino;
+// bionic's struct stat on 32-bit ARM (= stat64), natural alignment, 104 bytes.
+typedef struct stat64_bionic {
+    uint64_t st_dev;          // 0
+    uint8_t __pad0[4];        // 8
+    uint32_t __st_ino;        // 12
+    uint32_t st_mode;         // 16
+    uint32_t st_nlink;        // 20
+    uint32_t st_uid;          // 24
+    uint32_t st_gid;          // 28
+    uint64_t st_rdev;         // 32
+    uint8_t __pad3[4];        // 40
+    int64_t st_size;          // 48
+    uint32_t st_blksize;      // 56
+    uint64_t st_blocks;       // 64
+    struct { int32_t tv_sec; int32_t tv_nsec; } st_atim, st_mtim, st_ctim; // 72, 80, 88
+    uint64_t st_ino;          // 96
 } stat64_bionic;
 
-typedef struct __attribute__((__packed__)) dirent64_bionic {
-    int16_t d_ino; // 2 bytes // offset 0x0
-    int64_t d_off; // 8 bytes // offset 0x2
-    uint64_t d_reclen; // 8 bytes // 0xA
-    unsigned char d_type; // 1 byte // offset 0x12
-    char d_name[256]; // 256 bytes // offset 0x13
+_Static_assert(sizeof(stat64_bionic) == 104, "bionic struct stat size");
+_Static_assert(__builtin_offsetof(stat64_bionic, st_size) == 48, "bionic st_size offset");
+_Static_assert(__builtin_offsetof(stat64_bionic, st_blocks) == 64, "bionic st_blocks offset");
+_Static_assert(__builtin_offsetof(stat64_bionic, st_ino) == 96, "bionic st_ino offset");
+
+// bionic's struct dirent (= dirent64): 8+8+2+1+256, padded to 280 bytes.
+typedef struct dirent64_bionic {
+    uint64_t d_ino;           // 0
+    int64_t d_off;            // 8
+    uint16_t d_reclen;        // 16
+    uint8_t d_type;           // 18
+    char d_name[256];         // 19
 } dirent64_bionic;
+
+_Static_assert(__builtin_offsetof(dirent64_bionic, d_name) == 19, "bionic d_name offset");
 
 int open_soloader(const char * path, int oflag, ...);
 

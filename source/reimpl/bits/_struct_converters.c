@@ -66,8 +66,10 @@ SC_INLINE
 dirent64_bionic * dirent_newlib_to_bionic(const struct dirent* dirent_newlib) {
     dirent64_bionic * ret = malloc(sizeof(dirent64_bionic));
     strncpy(ret->d_name, dirent_newlib->d_name, sizeof(ret->d_name));
+    static uint64_t next_ino = 1000;
+    ret->d_ino = next_ino++; // some code skips entries with d_ino == 0
     ret->d_off = 0;
-    ret->d_reclen = 0;
+    ret->d_reclen = sizeof(dirent64_bionic);
     ret->d_type = SCE_S_ISDIR(dirent_newlib->d_stat.st_mode) ? DT_DIR : DT_REG;
     return ret;
 }
@@ -88,8 +90,9 @@ void stat_newlib_to_bionic(const struct stat * src, stat64_bionic * dst) {
     dst->st_gid = src->st_gid;
     dst->st_rdev = src->st_rdev;
     dst->st_size = src->st_size;
-    dst->st_blksize = src->st_blksize;
-    dst->st_blocks = src->st_blocks;
+    // newlib on the Vita leaves these 0; programs size their copy buffers with them
+    dst->st_blksize = src->st_blksize ? src->st_blksize : 4096;
+    dst->st_blocks = src->st_blocks ? src->st_blocks : (src->st_size + 511) / 512;
     dst->st_atim.tv_sec = src->st_atime;
     dst->st_atim.tv_nsec = 0;
     dst->st_mtim.tv_sec = src->st_mtime;
