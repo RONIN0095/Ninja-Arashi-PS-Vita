@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include <vitaGL.h>
+#include <psp2/gxm.h>
 
 #include "na_shaders.h"
 
@@ -617,11 +618,56 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
         check_upload("glCompressedTexSubImage2D", format, w, h);
         free(converted);
         note_filled(target);
+        note_big_upload(target, w, h);
     } else {
         static int warned = 0;
         if (warned++ < 8)
             l_warn("glCompressedTexSubImage2D: partial update (%d,%d %dx%d of %dx%d) ignored", x, y, w, h, lw, lh);
     }
+}
+
+
+/*
+ * Texture memory dumps: the big ETC2 pictures (title, cutscenes) draw black
+ * in large parts although vitaGL's decode + DXT5 path gives the right
+ * picture on a PC. The first big textures' GPU memory is written to files
+ * right after the upload and again with each screenshot, to compare.
+ */
+#define MAX_DUMP_TEX 3
+static GLuint dump_tex[MAX_DUMP_TEX];
+static int n_dump_tex = 0;
+
+static void dump_tex_data(GLuint t, const char *when) {
+    if (t >= MAX_TEX_INFO || !tex_info[t].w) return;
+    GLint old = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D_, &old);
+    glBindTexture(GL_TEXTURE_2D, t);
+    void *p = vglGetTexDataPointer(GL_TEXTURE_2D);
+    SceGxmTexture *gt = vglGetGxmTexture(GL_TEXTURE_2D);
+    unsigned fmt = gt ? (unsigned)sceGxmTextureGetFormat(gt) : 0;
+    unsigned tw = gt ? sceGxmTextureGetWidth(gt) : 0, th = gt ? sceGxmTextureGetHeight(gt) : 0;
+    size_t size = (size_t)tw * th; // DXT5: one byte per pixel
+    char path[96];
+    snprintf(path, sizeof(path), DATA_PATH "tex%u_%s.bin", t, when);
+    int ok = 0;
+    if (p && size) {
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            ok = fwrite(p, 1, size, f) == size;
+            fclose(f);
+        }
+    }
+    l_info("[GL] texture %u (%s): data %p, gxm format 0x%x, %ux%u -> %s%s", t, when, p, fmt, tw, th, path,
+           ok ? "" : " (not written)");
+    glBindTexture(GL_TEXTURE_2D, old);
+}
+
+static void note_big_upload(GLenum target, GLsizei w, GLsizei h) {
+    if (target != 0x0DE1 || w < 1024 || h < 1024 || n_dump_tex >= MAX_DUMP_TEX) return;
+    GLuint t = unit_tex[active_unit];
+    dump_tex[n_dump_tex++] = t;
+    glFinish();
+    dump_tex_data(t, "upload");
 }
 
 static void glGetTexLevelParameteriv_na(GLenum target, GLint level, GLenum pname, GLint *params) { *params = 0; }
@@ -831,6 +877,7 @@ static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, G
     check_upload("glCompressedTexImage2D", ifmt, w, h);
     free(converted);
     note_filled(target);
+    note_big_upload(target, w, h);
 }
 
 static void glGenerateMipmap_na(GLenum target) {}
@@ -1722,6 +1769,11 @@ void na_gl_screenshot(int n) {
     glBindFramebuffer(0x8CA8, bound_read_fb);
     glBindFramebuffer(0x8CA9, bound_draw_fb);
     free(px);
+    for (int i = 0; i < n_dump_tex; i++) {
+        char when[16];
+        snprintf(when, sizeof(when), "shot%d", n);
+        dump_tex_data(dump_tex[i], when);
+    }
 }
 
 // The runtime shader compiler's messages (vitaGL only logs them in debug builds)
