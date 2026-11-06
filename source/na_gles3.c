@@ -166,11 +166,11 @@ static int es3_integer(GLenum pname, GLint *v) {
         case GL_MAX_DRAW_BUFFERS_: *v = 1; return 1;
         case GL_MAX_COLOR_ATTACHMENTS_: *v = 1; return 1;
         case GL_MAX_SAMPLES_: *v = 1; return 1;
-        case GL_MAX_UNIFORM_BUFFER_BINDINGS_: *v = 24; return 1;
+        case GL_MAX_UNIFORM_BUFFER_BINDINGS_: *v = 14; return 1; // vitaGL's UBOS_NUM
         case GL_MAX_UNIFORM_BLOCK_SIZE_: *v = 16384; return 1;
-        case GL_MAX_VERTEX_UNIFORM_BLOCKS_: *v = 12; return 1;
-        case GL_MAX_FRAGMENT_UNIFORM_BLOCKS_: *v = 12; return 1;
-        case GL_MAX_COMBINED_UNIFORM_BLOCKS_: *v = 24; return 1;
+        case GL_MAX_VERTEX_UNIFORM_BLOCKS_: *v = 7; return 1;
+        case GL_MAX_FRAGMENT_UNIFORM_BLOCKS_: *v = 7; return 1;
+        case GL_MAX_COMBINED_UNIFORM_BLOCKS_: *v = 14; return 1;
         case GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT_: *v = 256; return 1;
         case GL_MAX_VERTEX_OUTPUT_COMPONENTS_: *v = 64; return 1;
         case GL_MAX_FRAGMENT_INPUT_COMPONENTS_: *v = 60; return 1;
@@ -368,6 +368,24 @@ static void glBindBuffer_na(GLenum target, GLuint buffer) {
     int i = extra_index(target);
     if (i >= 0) extra_bound[i] = buffer;
     else glBindBuffer(target, buffer);
+}
+
+/*
+ * vitaGL keeps 14 uniform buffer bindings (UBOS_NUM) and doesn't check the
+ * index: Unity, told there were 24, bound slots 14-23 and those writes
+ * landed in the variables after vitaGL's table - is_shark_online, link
+ * counters and the first entry of the program table, whose shaders and
+ * status became 0 (program 1 "unlinked itself"; the cutscene drew nothing).
+ * Bindings past 14 are dropped (the translated shaders use no uniform blocks).
+ */
+static void glBindBufferBase_na(GLenum target, GLuint index, GLuint buffer) {
+    if (target == 0x8A11 /* UNIFORM_BUFFER */ && index >= 14) return;
+    glBindBufferBase(target, index, buffer);
+}
+
+static void glBindBufferRange_na(GLenum target, GLuint index, GLuint buffer, GLintptr off, GLsizeiptr size) {
+    if (target == 0x8A11 && index >= 14) return;
+    glBindBufferRange(target, index, buffer, off, size);
 }
 
 static void glDeleteBuffers_na(GLsizei n, const GLuint *ids) {
@@ -1484,7 +1502,7 @@ static const gl_entry gl_table[] = {
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
     E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCreateProgram), E(glAttachShader), E(glDeleteShader), E(glCompileShader), E(glBindFramebuffer),
     E(glBindAttribLocation), E(glGetUniformLocation), E(glUniform4fv), E(glUniformMatrix4fv), E(glUniform1i),
-    E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
+    E(glBindBuffer), E(glBindBufferBase), E(glBindBufferRange), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
     { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
     { "glUnmapBufferOES", (void *)&glUnmapBuffer_na }, E(glFlushMappedBufferRange),
     { "glFlushMappedBufferRangeEXT", (void *)&glFlushMappedBufferRange_na }, E(glGetBufferParameteriv),
