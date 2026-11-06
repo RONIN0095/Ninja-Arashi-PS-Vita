@@ -41,6 +41,7 @@ extern "C" {
 #define l_fatal(...)   _log_print(LT_FATAL,   __VA_ARGS__)
 
 // The most recent log lines (oldest first), for on-screen reports
+void log_flush(void);
 int log_recent_count(void);
 const char *log_recent_line(int i);
 int log_raw_printf(const char *fmt, ...);

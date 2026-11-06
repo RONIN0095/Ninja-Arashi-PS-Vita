@@ -71,6 +71,7 @@ static volatile uint64_t last_frame_us = 0;
 static int watchdog_thread(SceSize args, void *argp) {
     while (1) {
         sceKernelDelayThread(1000 * 1000);
+        log_flush();
         // read the last activity first: a frame finishing in between must not
         // look like one far in the future (that underflowed into a false alarm)
         uint64_t last = log_last_activity_us > last_frame_us ? log_last_activity_us : last_frame_us;
@@ -95,6 +96,7 @@ static int watchdog_thread(SceSize args, void *argp) {
             na_gl_log_memory();
             na_threads_report();
             sceKernelDelayThread(200 * 1000);
+            log_flush();
             kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
             *(volatile int *)0 = 0;
         }

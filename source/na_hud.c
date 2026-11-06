@@ -6,7 +6,8 @@
  * icon images; see the level scenes); the control object itself keeps its
  * own graphic, the touch area, and its event handlers. Every second, on the
  * main thread between frames, those child objects are looked up with
- * GameObject.Find and switched off with SetActive(false). (IL2CPP stripped
+ * GameObject.Find and switched off with SetActive(false), every 3 frames
+ * so they are gone before they are seen. (IL2CPP stripped
  * GetComponentsInChildren(Type, bool) and CanvasRenderer.SetAlpha from this
  * build, so the objects are switched off rather than made transparent.)
  * Find only returns active objects: controls the game turns on later are
@@ -31,7 +32,7 @@ typedef void *(*string_new_t)(const char *s);
 
 static runtime_invoke_t invoke;
 static string_new_t string_new;
-static void *m_find, *m_set_active;
+static void *m_find, *m_set_active, *m_set_shadows, *m_set_shadow_distance;
 static int state = 0; // 0 not set up, 1 ready, -1 failed
 
 static const char *const parts[] = {
@@ -66,6 +67,13 @@ static int setup(void) {
         l_warn("[HUD] GameObject class not found");
         return -1;
     }
+    // shadows: a 2D game on a small screen; the shadow pass cost GPU time
+    void *qs = class_from_name(assembly_image(core), "UnityEngine", "QualitySettings");
+    if (qs) {
+        m_set_shadows = method_from_name(qs, "set_shadows", 1);
+        m_set_shadow_distance = method_from_name(qs, "set_shadowDistance", 1);
+    }
+    l_info("[HUD] QualitySettings %p: set_shadows %p, set_shadowDistance %p", qs, m_set_shadows, m_set_shadow_distance);
     m_find = method_from_name(go, "Find", 1);
     m_set_active = method_from_name(go, "SetActive", 1);
     l_info("[HUD] Find %p, SetActive %p", m_find, m_set_active);
@@ -79,10 +87,23 @@ static void *call(void *method, void *obj, void **params) {
 }
 
 void na_hud_tick(int frame) {
-    if (state < 0 || frame < 60 || frame % 30 != 0) return;
+    if (state < 0 || frame < 30 || frame % 3 != 0) return; // every 3 frames: hidden before they show
     if (state == 0) {
         state = setup();
         if (state < 0) return;
+    }
+    if (frame % 300 == 0) { // shadows off (again after scene loads)
+        int none = 0;
+        float zero = 0.0f;
+        void *a[1];
+        if (m_set_shadows) {
+            a[0] = &none;
+            call(m_set_shadows, NULL, a);
+        }
+        if (m_set_shadow_distance) {
+            a[0] = &zero;
+            call(m_set_shadow_distance, NULL, a);
+        }
     }
     static int logged = 0;
     int hidden = 0;

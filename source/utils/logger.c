@@ -50,6 +50,9 @@ static SceUID log_fd = -1;
 static int log_lines = 0;
 #define LOG_MAX_LINES 20000
 
+static char wbuf[32 * 1024];
+static int wbuf_len = 0;
+
 static void log_to_file(int t, const char *fmt, va_list list) {
     if (log_fd < 0) {
         log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
@@ -63,7 +66,19 @@ static void log_to_file(int t, const char *fmt, va_list list) {
     n += sceClibVsnprintf(buffer_c + n, sizeof(buffer_c) - n, fmt, list);
     if (n > (int)sizeof(buffer_c) - 2) n = sizeof(buffer_c) - 2;
     buffer_c[n++] = '\n';
-    sceIoWrite(fd, buffer_c, n);
+    // Buffered: one write per line made loading slow (hundreds of lines while
+    // a scene loads). Warnings and worse are written at once; the watchdog
+    // flushes the rest every second (log_flush).
+    if (wbuf_len + n > (int)sizeof(wbuf)) {
+        sceIoWrite(fd, wbuf, wbuf_len);
+        wbuf_len = 0;
+    }
+    sceClibMemcpy(wbuf + wbuf_len, buffer_c, n);
+    wbuf_len += n;
+    if (t >= LT_WARN && t <= LT_FATAL) {
+        sceIoWrite(fd, wbuf, wbuf_len);
+        wbuf_len = 0;
+    }
 
     // Keep the last lines for the on-screen hang report
     buffer_c[n - 1] = '\0';
@@ -152,4 +167,15 @@ int log_raw_printf(const char *fmt, ...) {
     if (log_fd < 0) return 0;
     sceIoWrite(log_fd, buf, n);
     return n;
+}
+
+// Writes buffered log lines to the file (the watchdog calls it every second)
+void log_flush(void) {
+    if (!atomic_load_explicit(&_log_mutex_ready, memory_order_relaxed)) return;
+    sceKernelLockLwMutex(&_log_mutex, 1, NULL);
+    if (log_fd >= 0 && wbuf_len > 0) {
+        sceIoWrite(log_fd, wbuf, wbuf_len);
+        wbuf_len = 0;
+    }
+    sceKernelUnlockLwMutex(&_log_mutex, 1);
 }

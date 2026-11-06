@@ -689,6 +689,67 @@ void eac_decode(uint8_t *in, uint8_t *out, const int w, const int h, int flag); 
 #define EAC_ETC2 0
 void stb_compress_dxt_block(unsigned char *dest, const unsigned char *src, int alpha, int mode);
 
+
+/*
+ * ETC2 -> RGBA -> DXT5 for a band of block rows. Converting a texture the
+ * first time is split over three threads (the Vita has three cores for
+ * games, and the others mostly wait while a scene loads).
+ */
+#include <pthread.h>
+typedef struct {
+    const uint8_t *etc;
+    uint8_t *dxt;
+    int w, row0, rows; // block rows
+    int ok;
+} conv_job;
+
+static void *conv_band(void *arg) {
+    conv_job *j = arg;
+    size_t bw = (size_t)j->w / 4;
+    uint8_t *rgba = malloc((size_t)j->w * 4 * 4 * j->rows);
+    if (!rgba) return NULL;
+    eac_decode((uint8_t *)j->etc + (size_t)j->row0 * bw * 16, rgba, j->w, j->rows * 4, EAC_ETC2);
+    uint8_t block[64], *out = j->dxt + (size_t)j->row0 * bw * 16;
+    for (int by = 0; by < j->rows * 4; by += 4)
+        for (int bx = 0; bx < j->w; bx += 4) {
+            for (int r = 0; r < 4; r++) memcpy(&block[r * 16], &rgba[((by + r) * j->w + bx) * 4], 16);
+            stb_compress_dxt_block(out, block, 1, 0);
+            out += 16;
+        }
+    free(rgba);
+    j->ok = 1;
+    return NULL;
+}
+
+static int etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) {
+    int rows = h / 4, n = rows >= 48 ? 3 : 1;
+    conv_job jobs[3];
+    pthread_t th[3];
+    int started[3] = { 0, 0, 0 };
+    for (int i = 0; i < n; i++) {
+        jobs[i].etc = etc;
+        jobs[i].dxt = dxt;
+        jobs[i].w = w;
+        jobs[i].row0 = rows * i / n;
+        jobs[i].rows = rows * (i + 1) / n - jobs[i].row0;
+        jobs[i].ok = 0;
+    }
+    for (int i = 1; i < n; i++) {
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setstacksize(&a, 64 * 1024);
+        started[i] = pthread_create(&th[i], &a, conv_band, &jobs[i]) == 0;
+        pthread_attr_destroy(&a);
+        if (!started[i]) conv_band(&jobs[i]);
+    }
+    conv_band(&jobs[0]);
+    for (int i = 1; i < n; i++)
+        if (started[i]) pthread_join(th[i], NULL);
+    for (int i = 0; i < n; i++)
+        if (!jobs[i].ok) return 0;
+    return 1;
+}
+
 static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, const void *data, GLsizei size) {
     if (target != GL_TEXTURE_2D || fmt != 0x9278 || !data) return 0;
     if (w < 64 || h < 64 || w > 2048 || h > 2048 || (w & (w - 1)) || (h & (h - 1))) return 0;
@@ -711,20 +772,10 @@ static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, c
             return 1;
         }
     }
-    uint8_t *rgba = malloc(dsize * 4);
-    if (!rgba) {
+    if (!etc2_to_dxt5(data, dxt, w, h)) {
         free(dxt);
         return 0;
     }
-    eac_decode((uint8_t *)data, rgba, w, h, EAC_ETC2);
-    uint8_t block[64], *out = dxt;
-    for (int by = 0; by < h; by += 4)
-        for (int bx = 0; bx < w; bx += 4) {
-            for (int r = 0; r < 4; r++) memcpy(&block[r * 16], &rgba[((by + r) * w + bx) * 4], 16);
-            stb_compress_dxt_block(out, block, 1, 0);
-            out += 16;
-        }
-    free(rgba);
     glCompressedTexImage2D(target, 0, 0x83F3, w, h, 0, (GLsizei)dsize, dxt);
     mkdir(DATA_PATH "texcache", 0777);
     f = fopen(path, "wb");
@@ -1366,6 +1417,7 @@ static void glUniform1i_na(GLint loc, GLint v) {
 // vitaGL crashes drawing with a program that never linked (no vertex shader attached)
 #define MAX_PROGS 4096
 static uint8_t prog_linked[MAX_PROGS];
+static uint8_t prog_shadow[MAX_PROGS]; // shadow caster programs (no shadows on the Vita)
 
 static void glCompileShader_na(GLuint s) {
     glCompileShader(s);
@@ -1389,6 +1441,20 @@ static void glLinkProgram_na(GLuint p) {
     GLint ok = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
     if (p < MAX_PROGS) prog_linked[p] = ok ? 1 : 0;
+
+    // Shadow casters (they have unity_LightShadowBias): their draws are skipped
+    if (ok && p < MAX_PROGS) {
+        GLint nu = 0;
+        glGetProgramiv(p, 0x8B86, &nu);
+        prog_shadow[p] = 0;
+        for (int i = 0; i < nu && i < 64; i++) {
+            char n[64] = "";
+            GLsizei len = 0; GLint size = 0; GLenum type = 0;
+            glGetActiveUniform(p, i, sizeof(n), &len, &size, &type, n);
+            if (strcmp(n, "unity_LightShadowBias") == 0) prog_shadow[p] = 1;
+        }
+        if (prog_shadow[p]) l_info("[GL] program %u is a shadow caster: its draws are skipped", p);
+    }
 
     // What Unity will see of the first programs: attributes and uniforms
     static int described = 0;
@@ -1460,6 +1526,8 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
                       char *desc, size_t desc_size) {
     if (count <= 0) return 0;
     if (!program_ok()) return 0;
+    // no shadows: a 2D game on a small screen, and the pass cost GPU time
+    if (cur_program < MAX_PROGS && prog_shadow[cur_program]) return 0;
     check_empty_textures();
     uint32_t last;
     if (elements) {
