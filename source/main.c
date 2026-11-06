@@ -71,6 +71,12 @@ static int watchdog_thread(SceSize args, void *argp) {
         sceKernelDelayThread(1000 * 1000);
         uint64_t now = sceKernelGetProcessTimeWide();
         uint64_t last = log_last_activity_us > last_frame_us ? log_last_activity_us : last_frame_us;
+        static int ticks = 0;
+        if (++ticks % 10 == 0) { // every 10 s, also while stuck (doesn't count as progress)
+            uint64_t saved = log_last_activity_us;
+            na_gl_log_memory();
+            log_last_activity_us = saved;
+        }
         // L + R + SELECT held for 3 s: a core dump on request (shows where every thread is)
         static int combo_s = 0;
         SceCtrlData pad;
@@ -81,6 +87,7 @@ static int watchdog_thread(SceSize args, void *argp) {
         if (combo_s >= 3 || (last && now - last > 90ULL * 1000 * 1000)) {
             if (combo_s >= 3) l_fatal("L+R+SELECT: crashing on purpose for a core dump.");
             else l_fatal("Watchdog: no progress for 90 s, crashing on purpose for a core dump.");
+            na_gl_log_memory();
             sceKernelDelayThread(200 * 1000);
             kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
             *(volatile int *)0 = 0;

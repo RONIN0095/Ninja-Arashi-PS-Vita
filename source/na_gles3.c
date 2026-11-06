@@ -782,10 +782,17 @@ static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h) {
                (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024), (unsigned)(vglMemFree(VGL_MEM_EXTERNAL) / 1024));
 }
 
+#include <malloc.h>
+extern int _newlib_heap_size_user; // main.c
+
 void na_gl_log_memory(void) {
-    l_info("[GL] free memory: vram %u KB, ram %u KB, phycont %u KB, newlib %u KB",
+    // newlib heap: what is handed out (uordblks) of the heap grown so far (arena)
+    struct mallinfo mi = mallinfo();
+    l_info("[MEM] heap: %u KB used, %u KB free in arena, %u KB never touched; vram %u KB free, vgl ram %u KB, phycont %u KB",
+           (unsigned)(mi.uordblks / 1024), (unsigned)(mi.fordblks / 1024),
+           (unsigned)((_newlib_heap_size_user - (int)mi.arena) / 1024),
            (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024), (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
-           (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024), (unsigned)(vglMemFree(VGL_MEM_EXTERNAL) / 1024));
+           (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024));
 }
 
 static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
