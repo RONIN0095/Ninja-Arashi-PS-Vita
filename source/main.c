@@ -84,9 +84,9 @@ static int watchdog_thread(SceSize args, void *argp) {
         int combo = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT)) ==
                     (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT);
         combo_s = combo ? combo_s + 1 : 0;
-        if (combo_s >= 3 || (last && now - last > 90ULL * 1000 * 1000)) {
+        if (combo_s >= 3 || (last && now - last > 45ULL * 1000 * 1000)) {
             if (combo_s >= 3) l_fatal("L+R+SELECT: crashing on purpose for a core dump.");
-            else l_fatal("Watchdog: no progress for 90 s, crashing on purpose for a core dump.");
+            else l_fatal("Watchdog: no progress for 45 s, crashing on purpose for a core dump.");
             na_gl_log_memory();
             sceKernelDelayThread(200 * 1000);
             kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler

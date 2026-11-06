@@ -909,6 +909,41 @@ static unsigned long getauxval_na(unsigned long type) {
 }
 
 /*
+ * Networking: the Vita's network stack is never started, and a DNS lookup on
+ * it does not come back. curl (UnityWebRequest, used by ads and analytics when
+ * a level starts) then waits for its resolver thread forever, and so does the
+ * main thread waiting on the request. Report "no network" right away instead.
+ */
+#define EAI_NONAME_BIONIC 8
+
+static int getaddrinfo_na(const char *node, const char *service, const void *hints, void **res) {
+    static int logged = 0;
+    if (logged++ < 16) l_info("getaddrinfo(%s, %s): no network", node ? node : "(null)", service ? service : "(null)");
+    if (res) *res = NULL;
+    return EAI_NONAME_BIONIC;
+}
+
+static void freeaddrinfo_na(void *ai) {}
+
+static void *gethostbyname_na(const char *name) {
+    static int logged = 0;
+    if (logged++ < 16) l_info("gethostbyname(%s): no network", name ? name : "(null)");
+    return NULL;
+}
+
+static int socket_na(int domain, int type, int protocol) {
+    static int logged = 0;
+    if (logged++ < 16) l_info("socket(%d, %d, %d): no network", domain, type, protocol);
+    errno = ENETDOWN;
+    return -1;
+}
+
+static int connect_na(int fd, const void *addr, int len) {
+    errno = ENETUNREACH;
+    return -1;
+}
+
+/*
  * syscall(): futex (Unity's baselib locks are built on it), gettid, CPU affinity
  */
 #define NR_GETTID 224
@@ -1091,6 +1126,13 @@ so_default_dynlib na_dynlib[] = {
     { "getauxval", (uintptr_t)&getauxval_na },
     { "syscall", (uintptr_t)&syscall_na },
     { "sysconf", (uintptr_t)&sysconf_na },
+
+    // no network (see getaddrinfo_na)
+    { "getaddrinfo", (uintptr_t)&getaddrinfo_na },
+    { "freeaddrinfo", (uintptr_t)&freeaddrinfo_na },
+    { "gethostbyname", (uintptr_t)&gethostbyname_na },
+    { "socket", (uintptr_t)&socket_na },
+    { "connect", (uintptr_t)&connect_na },
 
     // files (paths inside the APK are mapped, see na_apk.c)
     { "access", (uintptr_t)&access_soloader },
