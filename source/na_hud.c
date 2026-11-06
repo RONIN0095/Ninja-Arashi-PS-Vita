@@ -10,7 +10,8 @@
  * GetComponentsInChildren(Type, bool) and CanvasRenderer.SetAlpha from this
  * build, so the objects are switched off rather than made transparent.)
  * Find only returns active objects: controls the game turns on later are
- * caught on a later pass.
+ * caught on a later pass. The main menu's "Remove Ads" button goes the same
+ * way: there is no store on the Vita.
  */
 
 #include <stdint.h>
@@ -38,6 +39,8 @@ static const char *const parts[] = {
     "Canvas/PlayButton/Skill/Up/Image",   "Canvas/PlayButton/Skill/Fi/Image",
     "Canvas/PlayButton/Skill/Dash/Image", "Canvas/PlayButton/Skill/Check/Check image",
     "Canvas/PlayButton/Trans/Image",
+    // main menu: the "Remove Ads" purchase button (no store on the Vita)
+    "CanvasMain/LevelChoiseCanVas/Remove Ads",
 };
 
 static void *sym(const char *name) {
@@ -94,6 +97,6 @@ void na_hud_tick(int frame) {
     }
     if (hidden && logged < 8) {
         logged++;
-        l_info("[HUD] %d touch control images hidden", hidden);
+        l_info("[HUD] %d objects hidden", hidden);
     }
 }
