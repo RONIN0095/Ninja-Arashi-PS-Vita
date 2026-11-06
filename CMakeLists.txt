@@ -283,8 +283,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       )
 
 vita_create_self(eboot.bin ${CMAKE_PROJECT_NAME} UNSAFE NOASLR)
-# LiveArea images: placeholders in extras/livearea (made by
-# tools/make_livearea.py; no game art is published)
+# LiveArea images in extras/livearea: original art drawn by
+# tools/livearea.py (no game art is published)
 set(LIVEAREA_DIR "${CMAKE_SOURCE_DIR}/extras/livearea" CACHE PATH "Folder with icon0/pic0/bg0/startup.png and template.xml")
 
 vita_create_vpk(${VITA_VPKNAME}.vpk ${VITA_TITLEID} eboot.bin
