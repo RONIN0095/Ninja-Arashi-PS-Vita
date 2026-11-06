@@ -34,6 +34,7 @@
 static void glBindFramebuffer_na(GLenum target, GLuint fb); // with the screenshot code at the end
 static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h);
 static int blend_on = 0; // GL_BLEND, for the draw trace
+static GLenum blend_f[4] = { GL_ONE, GL_ZERO, GL_ONE, GL_ZERO }; // current blend factors
 static GLuint bound_draw_fb, bound_read_fb; // (screenshot code)
 // Bound 2D textures per unit and texture sizes, for the draw trace
 static GLuint unit_tex[16];
@@ -970,8 +971,35 @@ static void glEnable_na(GLenum cap) {
     glEnable(cap);
 }
 
+/*
+ * Color writes off (glColorMask(0, 0, 0, 0)): Unity's UI Mask draws its
+ * shape that way, only to write the stencil, before and after the masked
+ * content. vitaGL didn't keep the color out of those draws, so the closing
+ * mask draw covered the whole list (level select: chapter art, levels) with
+ * an opaque rectangle. Such draws now also blend with (ZERO, ONE), which
+ * leaves the color buffer as it is whatever the mask does.
+ */
+static int color_mask_off = 0;
+
+static void glColorMask_na(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+    color_mask_off = !r && !g && !b && !a;
+    glColorMask(r, g, b, a);
+}
+
 static void glColorMaski_na(GLuint i, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
-    if (i == 0) glColorMask(r, g, b, a);
+    if (i == 0) glColorMask_na(r, g, b, a);
+}
+
+static void masked_draw_begin(void) {
+    if (!color_mask_off) return;
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ZERO, GL_ONE);
+}
+
+static void masked_draw_end(void) {
+    if (!color_mask_off) return;
+    glBlendFuncSeparate(blend_f[0], blend_f[1], blend_f[2], blend_f[3]);
+    if (!blend_on) glDisable(GL_BLEND);
 }
 
 static void glBlendEquationi_na(GLuint i, GLenum mode) {
@@ -1038,7 +1066,6 @@ extern volatile int na_egl_swap_count; // na_egl.c
 static GLuint cur_program = 0;
 static int draw_no = 0, draws_traced = 0, bad_draws = 0;
 static uint32_t first_vertex = 0;
-static GLenum blend_f[4] = { GL_ONE, GL_ZERO, GL_ONE, GL_ZERO };
 
 static void glBlendFunc_na(GLenum s, GLenum d) {
     blend_f[0] = blend_f[2] = s; blend_f[1] = blend_f[3] = d;
@@ -1255,9 +1282,10 @@ static void traced(const char *what, const char *desc) {
     }
     GLuint t = unit_tex[0];
     int ti = t < MAX_TEX_INFO;
-    l_info("[GL] draw %d: %s prog %u, %s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u", draw_no, what,
+    l_info("[GL] draw %d: %s prog %u, %s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u%s", draw_no, what,
            cur_program, desc, col, blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3], t,
-           ti ? tex_info[t].w : 0, ti ? tex_info[t].h : 0, ti ? tex_info[t].fmt : 0, bound_draw_fb);
+           ti ? tex_info[t].w : 0, ti ? tex_info[t].h : 0, ti ? tex_info[t].fmt : 0, bound_draw_fb,
+           color_mask_off ? ", color writes off" : "");
 }
 
 static void traced_done(void) {
@@ -1271,7 +1299,9 @@ static void glDrawArrays_na(GLenum mode, GLint first, GLsizei count) {
     if (!check_draw(count, 0, NULL, 0, first, 0, desc, sizeof(desc))) return;
     int t = trace_this_draw();
     if (t) traced("DrawArrays", desc);
+    masked_draw_begin();
     glDrawArrays(mode, first, count);
+    masked_draw_end();
     if (t) traced_done();
 }
 
@@ -1281,7 +1311,9 @@ static void glDrawArraysInstanced_na(GLenum mode, GLint first, GLsizei count, GL
     if (!check_draw(count, 0, NULL, 0, first, 0, desc, sizeof(desc))) return;
     int t = trace_this_draw();
     if (t) traced("DrawArraysInstanced", desc);
+    masked_draw_begin();
     glDrawArraysInstanced(mode, first, count, n);
+    masked_draw_end();
     if (t) traced_done();
 }
 
@@ -1291,7 +1323,9 @@ static void glDrawElements_na(GLenum mode, GLsizei count, GLenum type, const voi
     if (!check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc))) return;
     int t = trace_this_draw();
     if (t) traced("DrawElements", desc);
+    masked_draw_begin();
     glDrawElements(mode, count, type, indices);
+    masked_draw_end();
     if (t) traced_done();
 }
 
@@ -1301,10 +1335,12 @@ static void glDrawElementsBaseVertex_na(GLenum mode, GLsizei count, GLenum type,
     if (!check_draw(count, type, indices, base, 0, 1, desc, sizeof(desc))) return;
     int t = trace_this_draw();
     if (t) traced("DrawElementsBaseVertex", desc);
+    masked_draw_begin();
     if (base == 0)
         glDrawElements(mode, count, type, indices);
     else
         glDrawElementsBaseVertex(mode, count, type, indices, base);
+    masked_draw_end();
     if (t) traced_done();
 }
 
@@ -1314,7 +1350,9 @@ static void glDrawElementsInstanced_na(GLenum mode, GLsizei count, GLenum type, 
     if (!check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc))) return;
     int t = trace_this_draw();
     if (t) traced("DrawElementsInstanced", desc);
+    masked_draw_begin();
     glDrawElementsInstanced(mode, count, type, indices, n);
+    masked_draw_end();
     if (t) traced_done();
 }
 
@@ -1388,7 +1426,7 @@ static const gl_entry gl_table[] = {
     E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
     E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
     { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
-    E(glEnable), E(glDisable), E(glActiveTexture), E(glBindTexture), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glEnable), E(glDisable), E(glColorMask), E(glActiveTexture), E(glBindTexture), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
