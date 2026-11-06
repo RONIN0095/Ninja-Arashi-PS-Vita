@@ -1079,9 +1079,35 @@ static void glBlendFuncSeparate_na(GLenum sr, GLenum dr, GLenum sa, GLenum da) {
 #define TRACE_FROM_SWAP 650 // just after the second screenshot: the menu is up
 #define TRACED_DRAWS 120
 
+/*
+ * Program lifetime as in GL: a program deleted while it is current stays
+ * alive until another program is made current. vitaGL frees it at once and
+ * hands its id to the next glCreateProgram; Unity deletes shaders while
+ * switching scenes (cutscene: every draw then used a program slot vitaGL
+ * had cleared). The first program events after the first scene change are
+ * logged.
+ */
+static GLuint pending_delete = 0;
+static int prog_events = 0;
+#define PROG_EVENT(...) do { \
+        if (na_egl_swap_count >= 300 && prog_events < 200) { prog_events++; l_info("[GL] " __VA_ARGS__); } \
+    } while (0)
+
 static void glUseProgram_na(GLuint p) {
+    if (p != cur_program) PROG_EVENT("glUseProgram(%u)", p);
     cur_program = p;
     glUseProgram(p);
+    if (pending_delete && pending_delete != p) {
+        PROG_EVENT("deferred glDeleteProgram(%u)", pending_delete);
+        glDeleteProgram(pending_delete);
+        pending_delete = 0;
+    }
+}
+
+static GLuint glCreateProgram_na(void) {
+    GLuint p = glCreateProgram();
+    PROG_EVENT("glCreateProgram() = %u", p);
+    return p;
 }
 
 // How Unity binds attributes and fills uniforms (the first calls only)
@@ -1136,6 +1162,7 @@ static void glCompileShader_na(GLuint s) {
 }
 
 static void glLinkProgram_na(GLuint p) {
+    PROG_EVENT("glLinkProgram(%u)", p);
     glLinkProgram(p);
     GLint ok = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
@@ -1168,7 +1195,15 @@ static void glLinkProgram_na(GLuint p) {
 }
 
 static void glDeleteProgram_na(GLuint p) {
+    if (!p) return;
+    PROG_EVENT("glDeleteProgram(%u)%s", p, p == cur_program ? " (current: deferred)" : "");
     if (p < MAX_PROGS) prog_linked[p] = 0;
+    if (p == cur_program) {
+        if (pending_delete && pending_delete != p) glDeleteProgram(pending_delete);
+        pending_delete = p;
+        return;
+    }
+    if (p == pending_delete) pending_delete = 0;
     glDeleteProgram(p);
 }
 
@@ -1433,7 +1468,7 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsInstancedBaseVertexEXT", (void *)&glDrawElementsInstancedBaseVertex_na },
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
-    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCompileShader), E(glBindFramebuffer),
+    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCreateProgram), E(glCompileShader), E(glBindFramebuffer),
     E(glBindAttribLocation), E(glGetUniformLocation), E(glUniform4fv), E(glUniformMatrix4fv), E(glUniform1i),
     E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
     { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
