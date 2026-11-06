@@ -444,8 +444,20 @@ static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, con
 #undef OP
 }
 
+static void *element_buffer(void); // the bound index buffer (needs vitaGL's VAO, below)
+
 static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
     void *r = NULL;
+    // MAP_INVALIDATE_BUFFER: the old contents may go; vitaGL would hand out
+    // the memory the GPU is still drawing from, so give the buffer new
+    // storage first (glBufferData frees the old one once the GPU is done)
+    if (access & 0x0008) {
+        vgl_vbo *b = NULL;
+        if (target == GL_ARRAY_BUFFER) b = (vgl_vbo *)vertex_array_unit;
+        else if (target == GL_ELEMENT_ARRAY_BUFFER) b = (vgl_vbo *)element_buffer();
+        else if (extra_index(target) >= 0) b = (vgl_vbo *)extra_bound[extra_index(target)];
+        if (b && b->size > 0) glBufferData_na(target, b->size, NULL, GL_DYNAMIC_DRAW);
+    }
 #define OP(t) r = glMapBufferRange(t, off, len, access)
     WITH_TARGET(target, OP);
 #undef OP
@@ -1256,6 +1268,7 @@ typedef struct { // vitaGL's vao (shared.h), VERTEX_ATTRIBS_NUM = 16
 } vgl_vao;
 
 extern vgl_vao *cur_vao; // vitaGL buffers.c
+static void *element_buffer(void) { return (void *)cur_vao->index_array_unit; }
 extern volatile int na_egl_swap_count; // na_egl.c
 
 static GLuint cur_program = 0;
@@ -1639,10 +1652,57 @@ static void glDrawElementsInstancedBaseVertex_na(GLenum mode, GLsizei count, GLe
 /*
  * Sync objects: vitaGL submits in order, so fences are always signaled.
  */
-static void *glFenceSync_na(GLenum cond, GLbitfield flags) { return (void *)1; }
-static GLenum glClientWaitSync_na(void *sync, GLbitfield flags, uint64_t timeout) { return GL_ALREADY_SIGNALED_; }
-static void glWaitSync_na(void *sync, GLbitfield flags, uint64_t timeout) {}
-static void glDeleteSync_na(void *sync) {}
+/*
+ * Fences. They used to report "signaled" at once, so Unity reused parts of
+ * its dynamic vertex/index buffers (particles, sprite batches) that the GPU
+ * was still drawing from the frame before: long streaks of stretched
+ * triangles across the level, most with many particles on screen.
+ * vitaGL sends a frame's draws to the GPU when the frame is swapped, so a
+ * fence from an earlier frame is waited for with glFinish (all submitted
+ * work done); one from the current frame has nothing submitted yet that
+ * Unity could be overwriting from an earlier frame, and counts as signaled.
+ */
+typedef struct { int swap; int done; } na_fence;
+static int fence_waits = 0;
+
+static void *glFenceSync_na(GLenum cond, GLbitfield flags) {
+    na_fence *f = malloc(sizeof(*f));
+    if (!f) return NULL;
+    f->swap = na_egl_swap_count;
+    f->done = 0;
+    return f;
+}
+
+static int fence_wait(na_fence *f) {
+    if (!f || f->done) return 1;
+    if (f->swap < na_egl_swap_count) {
+        glFinish();
+        f->done = 1;
+        fence_waits++;
+    }
+    return 1;
+}
+
+static GLenum glClientWaitSync_na(void *sync, GLbitfield flags, uint64_t timeout) {
+    fence_wait((na_fence *)sync);
+    return GL_ALREADY_SIGNALED_;
+}
+static void glWaitSync_na(void *sync, GLbitfield flags, uint64_t timeout) { fence_wait((na_fence *)sync); }
+static void glGetSynciv_na(void *sync, GLenum pname, GLsizei bufsize, GLsizei *length, GLint *values) {
+    if (length) *length = 1;
+    if (!values || bufsize < 1) return;
+    if (pname == 0x9114 /* SYNC_STATUS */) {
+        fence_wait((na_fence *)sync);
+        values[0] = 0x9119; // SIGNALED
+    } else if (pname == 0x9112 /* OBJECT_TYPE */) {
+        values[0] = 0x9116; // SYNC_FENCE
+    } else if (pname == 0x9113 /* SYNC_CONDITION */) {
+        values[0] = 0x9117; // SYNC_GPU_COMMANDS_COMPLETE
+    } else {
+        values[0] = 0;
+    }
+}
+static void glDeleteSync_na(void *sync) { free(sync); }
 static GLboolean glIsSync_na(void *sync) { return sync != NULL; }
 
 /*
@@ -1716,7 +1776,7 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsBaseVertexOES", (void *)&glDrawElementsBaseVertex_na },
     { "glDrawArraysInstancedEXT", (void *)&glDrawArraysInstanced_na },
     { "glDrawElementsInstancedEXT", (void *)&glDrawElementsInstanced_na },
-    E(glFenceSync), E(glClientWaitSync), E(glWaitSync), E(glDeleteSync), E(glIsSync),
+    E(glFenceSync), E(glClientWaitSync), E(glWaitSync), E(glDeleteSync), E(glIsSync), E(glGetSynciv),
 
     // Program binaries lose vitaGL's attribute bindings: let Unity compile from source
     HIDE(glGetProgramBinary), HIDE(glProgramBinary), HIDE(glGetProgramBinaryOES), HIDE(glProgramBinaryOES),
