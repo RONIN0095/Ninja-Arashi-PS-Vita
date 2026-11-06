@@ -118,11 +118,20 @@ static const struct {
 };
 #define N_VPAD (int)(sizeof(vpad) / sizeof(vpad[0]))
 
+volatile int na_trace_request = 0;
+
 static uint32_t vpad_buttons(void) {
     SceCtrlData pad;
     memset(&pad, 0, sizeof(pad));
     if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0) return 0;
     uint32_t b = pad.buttons;
+    // L+R+DOWN: log every draw of the next frame and take a screenshot
+    extern volatile int na_trace_request;
+    static int trace_combo = 0;
+    int combo = (b & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_DOWN)) ==
+                (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_DOWN);
+    if (combo && !trace_combo) na_trace_request = 1;
+    trace_combo = combo;
     if (pad.lx < 64) b |= VPAD_LEFT;
     if (pad.lx > 192) b |= VPAD_RIGHT;
     // L+R+SELECT is the watchdog's core dump combo: no touches for it

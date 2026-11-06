@@ -574,7 +574,7 @@ static int tex_storage_logged = 0;
 static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
     GLuint tex = bound_texture(target);
     note_texture(target, w, h, ifmt);
-    if (tex_storage_logged++ < 64)
+    if (tex_storage_logged++ < 400)
         l_info("[GL] glTexStorage2D(tex %u, target 0x%x, %d levels, 0x%x, %dx%d)", tex, target, levels, ifmt, w, h);
     tex_storage *s = storage_for(tex, 1);
     if (s) {
@@ -1360,7 +1360,17 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
     return 1;
 }
 
+// A whole frame traced on request (L+R+DOWN, see na_input.c / na_egl.c)
+volatile int na_trace_swap = -1;
+static int frame_traced = 0;
+
 static int trace_this_draw(void) {
+    static int last = -2;
+    if (na_trace_swap != last) {
+        last = na_trace_swap;
+        frame_traced = 0;
+    }
+    if (na_egl_swap_count == na_trace_swap) return frame_traced++ < 500;
     return na_egl_swap_count >= TRACE_FROM_SWAP && draws_traced < TRACED_DRAWS;
 }
 
@@ -1377,10 +1387,27 @@ static void traced(const char *what, const char *desc) {
                      cur_vao->vertex_attrib_config[1].format);
         }
     }
+    // first vertex position (attribute 0, floats) and depth state
+    char pos[64] = "";
+    if (cur_vao->vertex_attrib_state & 1) {
+        vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
+        uint32_t off = cur_vao->vertex_attrib_offsets[0] + first_vertex * cur_vao->vertex_stream_config[0].stride;
+        if (vb && vb->ptr && off + 12 <= (uint32_t)vb->size) {
+            const float *f = (const float *)((const uint8_t *)vb->ptr + off);
+            snprintf(pos, sizeof(pos), ", pos %.2f/%.2f/%.2f", f[0], f[1], f[2]);
+        }
+    }
+    GLint dfunc = 0;
+    GLboolean dmask = 0;
+    glGetIntegerv(GL_DEPTH_FUNC, &dfunc);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &dmask);
+    char depth[48];
+    snprintf(depth, sizeof(depth), ", depth %s 0x%x%s", glIsEnabled(GL_DEPTH_TEST) ? "on" : "off", dfunc,
+             dmask ? " write" : "");
     GLuint t = unit_tex[0];
     int ti = t < MAX_TEX_INFO;
-    l_info("[GL] draw %d: %s prog %u, %s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u%s", draw_no, what,
-           cur_program, desc, col, blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3], t,
+    l_info("[GL] draw %d: %s prog %u, %s%s%s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u%s", draw_no, what,
+           cur_program, desc, pos, depth, col, blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3], t,
            ti ? tex_info[t].w : 0, ti ? tex_info[t].h : 0, ti ? tex_info[t].fmt : 0, bound_draw_fb,
            color_mask_off ? ", color writes off" : "");
 }

@@ -251,6 +251,17 @@ void na_gl_screenshot(int n); // na_gles3.c
 EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Debug screenshots: 5 s and 20 s into the game
     if (na_egl_swap_count == 150 || na_egl_swap_count == 600) na_gl_screenshot(na_egl_swap_count);
+    // frame trace requested with L+R+DOWN: this frame's draws were logged
+    extern volatile int na_trace_swap;
+    extern volatile int na_trace_request;
+    if (na_egl_swap_count == na_trace_swap) {
+        na_gl_screenshot(na_egl_swap_count);
+        na_trace_swap = -1;
+    } else if (na_trace_request && na_trace_swap < 0) {
+        na_trace_request = 0;
+        na_trace_swap = na_egl_swap_count + 1;
+        l_info("[GL] tracing frame %d (L+R+DOWN)", na_trace_swap);
+    }
     vglSwapBuffers(GL_FALSE);
     na_egl_swap_count++;
     OK(EGL_TRUE);
