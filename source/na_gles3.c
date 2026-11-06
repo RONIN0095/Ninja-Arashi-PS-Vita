@@ -386,6 +386,7 @@ static int extra_index(GLenum target) {
 }
 
 #define PIXEL_UNPACK_IDX 3
+static int upload_logs = 0; // see log_upload
 
 static void glBindBuffer_na(GLenum target, GLuint buffer) {
     int i = extra_index(target);
@@ -429,12 +430,14 @@ static void glDeleteBuffers_na(GLsizei n, const GLuint *ids) {
     } while (0)
 
 static void glBufferData_na(GLenum target, GLsizei size, const void *data, GLenum usage) {
+    if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferData size %d data %p usage 0x%x", extra_bound[PIXEL_UNPACK_IDX], size, data, usage); }
 #define OP(t) glBufferData(t, size, data, usage)
     WITH_TARGET(target, OP);
 #undef OP
 }
 
 static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, const void *data) {
+    if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferSubData off %d size %d data %p", extra_bound[PIXEL_UNPACK_IDX], (int)off, (int)size, data); }
 #define OP(t) glBufferSubData(t, off, size, data)
     WITH_TARGET(target, OP);
 #undef OP
@@ -445,11 +448,17 @@ static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GL
 #define OP(t) r = glMapBufferRange(t, off, len, access)
     WITH_TARGET(target, OP);
 #undef OP
+    if (target == 0x88EC && upload_logs < 200) {
+        upload_logs++;
+        l_info("[UP] PBO %u: MapBufferRange off %d len %d access 0x%x -> %p", extra_bound[PIXEL_UNPACK_IDX], (int)off,
+               (int)len, access, r);
+    }
     return r;
 }
 
 static GLboolean glUnmapBuffer_na(GLenum target) {
     GLboolean r = GL_FALSE;
+    if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: UnmapBuffer", extra_bound[PIXEL_UNPACK_IDX]); }
 #define OP(t) r = glUnmapBuffer(t)
     WITH_TARGET(target, OP);
 #undef OP
@@ -457,6 +466,7 @@ static GLboolean glUnmapBuffer_na(GLenum target) {
 }
 
 static void glFlushMappedBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len) {
+    if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "FlushMappedBufferRange off %d len %d", extra_bound[PIXEL_UNPACK_IDX], (int)off, (int)len); }
 #define OP(t) glFlushMappedBufferRange(t, off, len)
     WITH_TARGET(target, OP);
 #undef OP
@@ -496,6 +506,27 @@ static const void *unpack_ptr(const void *data) {
     return b->ptr ? (const uint8_t *)b->ptr + (uintptr_t)data : NULL;
 }
 
+
+// Upload tracing for big textures: where the data comes from and how much of it is zero
+static void log_upload(const char *what, GLint x, GLint y, GLsizei w, GLsizei h, GLsizei size, const void *raw,
+                       const void *data) {
+    static int logged = 0;
+    if (w < 512 || logged >= 60) return;
+    logged++;
+    vgl_vbo *b = (vgl_vbo *)extra_bound[PIXEL_UNPACK_IDX];
+    size_t zero = 0, n = 0, first_nz = (size_t)-1, last_nz = 0;
+    if (data)
+        for (size_t i = 0; i + 4 <= (size_t)size; i += 64, n++) {
+            if (*(const uint32_t *)((const uint8_t *)data + i) == 0) zero++;
+            else {
+                if (first_nz == (size_t)-1) first_nz = i;
+                last_nz = i;
+            }
+        }
+    l_info("[UP] %s tex %u %d,%d %dx%d size %d: %s %p (pbo %p size %d) -> %p, %u%% zero words, nonzero %d..%d", what,
+           unit_tex[active_unit], x, y, w, h, size, b ? "pbo offset" : "pointer", raw, b, b ? b->size : 0, data,
+           n ? (unsigned)(zero * 100 / n) : 0, (int)first_nz, (int)last_nz);
+}
 /*
  * Textures: immutable storage on top of glTexImage2D
  */
@@ -606,7 +637,9 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
 static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
                                          GLenum format, GLsizei size, const void *data) {
     if (level > 0) return; // mipmaps are off
+    const void *raw = data;
     data = unpack_ptr(data);
+    log_upload("CompressedTexSubImage2D", x, y, w, h, size, raw, data);
     if (!data) return;
     tex_storage *s = storage_for(bound_texture(target), 0);
     GLsizei lw = s ? s->w >> level : w, lh = s ? s->h >> level : h;
@@ -870,7 +903,9 @@ static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, G
                                       GLsizei size, const void *data) {
     if (level > 0) return;
     note_texture(target, w, h, ifmt);
+    const void *raw = data;
     data = unpack_ptr(data);
+    log_upload("CompressedTexImage2D", 0, 0, w, h, size, raw, data);
     if (!data) return;
     void *converted = convert_etc2(&ifmt, &size, &data, w, h);
     glGetError();

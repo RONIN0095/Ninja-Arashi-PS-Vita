@@ -367,6 +367,11 @@ static int io_trace_left = 300;
 
 static long read_na(int fd, void *buf, size_t n) {
     long r = read(fd, buf, n);
+    static int short_logged = 0;
+    if (r >= 0 && (size_t)r < n && n >= 65536 && short_logged < 40) {
+        short_logged++;
+        l_info("read(%d, %u): short read %ld", fd, (unsigned)n, r);
+    }
     if (r < 0 && io_trace_left > 0) { io_trace_left--; l_warn("read(%d, %u): %ld", fd, (unsigned)n, r); }
     return r;
 }

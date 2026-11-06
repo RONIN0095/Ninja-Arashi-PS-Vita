@@ -132,8 +132,16 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
     if (fd >= 0) {
         off_t old = lseek(fd, 0, SEEK_CUR);
         lseek(fd, offs, SEEK_SET);
-        read(fd, ret, length);
+        size_t got = 0;
+        while (got < length) { // read() may return less than asked
+            int r = read(fd, (uint8_t *)ret + got, length - got);
+            if (r <= 0) break;
+            got += r;
+        }
         lseek(fd, old, SEEK_SET);
+        static int file_logged = 0;
+        if (file_logged++ < 100)
+            l_info("mmap(fd %d, off %ld, %u bytes): read %u", fd, (long)offs, (unsigned)length, (unsigned)got);
     }
 
     static int logged = 0;
