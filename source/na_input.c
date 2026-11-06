@@ -42,7 +42,7 @@
 #define SOURCE_GAMEPAD 0x00000401
 #define SOURCE_KEYBOARD 0x00000101
 
-#define MAX_POINTERS 6
+#define MAX_POINTERS 10
 
 typedef struct {
     int id;
@@ -89,6 +89,49 @@ static void send_motion(int action, int action_index, const touch_point *pts, in
     retire(ev);
 }
 
+
+/*
+ * Buttons -> touches on the game's on-screen controls. The game reads only
+ * its touch buttons (no key or gamepad input), so a held button is a finger
+ * held on the matching control. Positions come from the level scenes'
+ * canvas (CanvasScaler: 800x600 reference, matched to width -> x1.2 on the
+ * 960x544 screen; Unity's y is measured from the bottom):
+ *   Left  (0,0)+(67.3,77)     Right (0,0)+(201.4,77.2)
+ *   Up/jump (1,0)+(-61.1,60)  Fi/shuriken (1,0)+(-51.5,214.5)
+ *   Dash (1,0)+(-224.9,48)    Trans (1,0)+(-166.2,164.1)
+ *   Check (0,0.5)+(49.9,0)    Back/pause (1,1)+(-29.1,-29.4)
+ */
+#define VPAD_LEFT 0x10000000u // left stick pushed left/right
+#define VPAD_RIGHT 0x20000000u
+static const struct {
+    uint32_t buttons; // any of these
+    float x, y;       // screen pixels, y from the top
+} vpad[] = {
+    { SCE_CTRL_LEFT | VPAD_LEFT, 80.8f, 451.6f },     // Left
+    { SCE_CTRL_RIGHT | VPAD_RIGHT, 241.7f, 451.4f },  // Right
+    { SCE_CTRL_CROSS | SCE_CTRL_UP, 886.7f, 472.0f }, // jump
+    { SCE_CTRL_SQUARE, 898.2f, 286.6f },              // shuriken
+    { SCE_CTRL_CIRCLE | SCE_CTRL_RTRIGGER, 690.1f, 486.4f }, // dash
+    { SCE_CTRL_TRIANGLE, 760.6f, 347.1f },            // transform
+    { SCE_CTRL_LTRIGGER, 59.9f, 272.0f },             // check
+    { SCE_CTRL_START, 925.1f, 35.3f },                // pause
+};
+#define N_VPAD (int)(sizeof(vpad) / sizeof(vpad[0]))
+
+static uint32_t vpad_buttons(void) {
+    SceCtrlData pad;
+    memset(&pad, 0, sizeof(pad));
+    if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0) return 0;
+    uint32_t b = pad.buttons;
+    if (pad.lx < 64) b |= VPAD_LEFT;
+    if (pad.lx > 192) b |= VPAD_RIGHT;
+    // L+R+SELECT is the watchdog's core dump combo: no touches for it
+    if ((b & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT)) ==
+        (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT))
+        return 0;
+    return b;
+}
+
 static void poll_touch(void) {
     SceTouchData td;
     memset(&td, 0, sizeof(td));
@@ -100,6 +143,14 @@ static void poll_touch(void) {
         now[n_now].id = td.report[i].id & 0x7f;
         now[n_now].x = td.report[i].x * (float)SCREEN_W / 1920.0f;
         now[n_now].y = td.report[i].y * (float)SCREEN_H / 1088.0f;
+        n_now++;
+    }
+    uint32_t b = vpad_buttons();
+    for (int k = 0; k < N_VPAD && n_now < MAX_POINTERS; k++) {
+        if (!(b & vpad[k].buttons)) continue;
+        now[n_now].id = 128 + k; // real fingers are 0..127
+        now[n_now].x = vpad[k].x;
+        now[n_now].y = vpad[k].y;
         n_now++;
     }
 
