@@ -379,6 +379,16 @@ static int io_trace_left = 300;
 static long read_na(int fd, void *buf, size_t n) {
     long pos = na_io_fd_name(fd) ? (long)lseek(fd, 0, SEEK_CUR) : -1;
     long r = read(fd, buf, n);
+    /*
+     * A read that stops at the end of a file leaves the Vita's file position
+     * past the end (by what was asked minus 256 KB: reading 3 MB from a 1 MB
+     * split left it at 2.75 MB). Unity reads its split assets that way and
+     * then asks for the position, so it skipped the next split and big
+     * textures lost half their data (black title, black cutscene pictures,
+     * flat-coloured scenery). A short read on a file means its end: put the
+     * position there, as Linux does. (On pipes and sockets lseek just fails.)
+     */
+    if (r >= 0 && (size_t)r < n) lseek(fd, 0, SEEK_END);
     if (na_io_fd_name(fd) && na_io_trace_left > 0) {
         na_io_trace_left--;
         unsigned zero = 0, words = 0;
