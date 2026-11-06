@@ -36,15 +36,36 @@ static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h);
 static int blend_on = 0; // GL_BLEND, for the draw trace
 static GLenum blend_f[4] = { GL_ONE, GL_ZERO, GL_ONE, GL_ZERO }; // current blend factors
 static GLuint bound_draw_fb, bound_read_fb; // (screenshot code)
+#include "utils/logger.h"
 // Bound 2D textures per unit and texture sizes, for the draw trace
 static GLuint unit_tex[16];
 static int active_unit = 0;
 #define MAX_TEX_INFO 4096
-static struct { uint16_t w, h; uint32_t fmt; } tex_info[MAX_TEX_INFO];
+static struct { uint16_t w, h; uint32_t fmt; uint8_t filled, reported; } tex_info[MAX_TEX_INFO];
 static void note_texture(GLenum target, GLsizei w, GLsizei h, GLenum fmt) {
     if (target != 0x0DE1) return; // GL_TEXTURE_2D
     GLuint t = unit_tex[active_unit];
-    if (t < MAX_TEX_INFO) { tex_info[t].w = w; tex_info[t].h = h; tex_info[t].fmt = fmt; }
+    if (t < MAX_TEX_INFO) { tex_info[t].w = w; tex_info[t].h = h; tex_info[t].fmt = fmt; tex_info[t].filled = 0; }
+}
+// The texture got pixels (an upload, or it is a render target)
+static void note_filled_id(GLuint t) {
+    if (t < MAX_TEX_INFO) tex_info[t].filled = 1;
+}
+static void note_filled(GLenum target) {
+    if (target == 0x0DE1) note_filled_id(unit_tex[active_unit]);
+}
+// Draws with a texture that never got pixels show black or nothing: log them
+static void check_empty_textures(void) {
+    static int logged = 0;
+    if (logged >= 48) return;
+    for (int u = 0; u < 4; u++) {
+        GLuint t = unit_tex[u];
+        if (!t || t >= MAX_TEX_INFO || !tex_info[t].w || tex_info[t].filled || tex_info[t].reported) continue;
+        tex_info[t].reported = 1;
+        logged++;
+        l_warn("[GL] draw with texture %u (unit %d, %dx%d, fmt 0x%x) that never got pixels", t, u, tex_info[t].w,
+               tex_info[t].h, tex_info[t].fmt);
+    }
 }
 static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h);
 #include "utils/logger.h"
@@ -595,6 +616,7 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
         glCompressedTexImage2D(target, level, format, w, h, 0, size, data);
         check_upload("glCompressedTexSubImage2D", format, w, h);
         free(converted);
+        note_filled(target);
     } else {
         static int warned = 0;
         if (warned++ < 8)
@@ -730,6 +752,7 @@ static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, G
     glGetError();
     glTexImage2D(target, level, ifmt, w, h, border, format, type, unpack_ptr(data));
     check_upload("glTexImage2D", ifmt, w, h);
+    if (unpack_ptr(data)) note_filled(target);
 }
 
 static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
@@ -738,6 +761,7 @@ static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLs
     data = unpack_ptr(data);
     if (!data) return;
     glTexSubImage2D(target, level, x, y, w, h, format, type, data);
+    note_filled(target);
 }
 
 /*
@@ -806,6 +830,7 @@ static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, G
     glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
     check_upload("glCompressedTexImage2D", ifmt, w, h);
     free(converted);
+    note_filled(target);
 }
 
 static void glGenerateMipmap_na(GLenum target) {}
@@ -945,6 +970,7 @@ static void glFramebufferTexture2D_na(GLenum target, GLenum attachment, GLenum t
         return;
     }
     glFramebufferTexture2D(target, attachment, textarget, tex, level);
+    note_filled_id(tex);
 }
 
 static void glFramebufferTexture_na(GLenum target, GLenum attachment, GLuint tex, GLint level) {
@@ -1277,6 +1303,7 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
                       char *desc, size_t desc_size) {
     if (count <= 0) return 0;
     if (!program_ok()) return 0;
+    check_empty_textures();
     uint32_t last;
     if (elements) {
         int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
