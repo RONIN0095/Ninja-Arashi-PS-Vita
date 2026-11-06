@@ -1710,4 +1710,8 @@ void na_gles3_init(void) {
     // ETC2 textures (most of the game) are decoded and re-compressed to DXT5
     // instead of being stored as RGBA8 (4x the memory).
     glHint(GL_TEXTURE_COMPRESSION_HINT, GL_NICEST);
+    // ...with stb_dxt's normal mode instead of its slow high-quality one:
+    // the textures are re-encoded while the game runs, which made it stutter
+    extern GLboolean fast_texture_compression;
+    fast_texture_compression = GL_TRUE;
 }
