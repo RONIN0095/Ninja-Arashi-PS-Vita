@@ -770,6 +770,40 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         l_info("[JAVA] findLibrary(%s) -> %s", n ? n : "?", path);
         free(n);
         r.l = jstr(path);
+    } else if (is(cls, "android/net/Uri") && (is(name, "encode") || is(name, "decode")) && argc >= 1) {
+        // Unity's PlayerPrefs store every key as Uri.encode(key): answered
+        // with null, all keys became "" and every value overwrote the last one
+        // (the game then saw a value for "intro seen" and skipped intro and tutorial).
+        char *in = jo_jstring_to_utf8((jstring)args[0].l);
+        if (!in) {
+            r.l = NULL;
+        } else if (is(name, "encode")) {
+            // Android's Uri.encode: everything but A-Z a-z 0-9 _-!.~'()* as %XX (UTF-8 bytes)
+            static const char *keep = "_-!.~'()*";
+            char *out = malloc(strlen(in) * 3 + 1), *o = out;
+            for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+                if (isalnum(*p) || strchr(keep, *p)) *o++ = (char)*p;
+                else o += sprintf(o, "%%%02X", *p);
+            }
+            *o = 0;
+            r.l = jstr(out);
+            free(out);
+        } else {
+            char *out = malloc(strlen(in) + 1), *o = out;
+            for (const char *p = in; *p; p++) {
+                if (p[0] == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+                    char h[3] = { p[1], p[2], 0 };
+                    *o++ = (char)strtol(h, NULL, 16);
+                    p += 2;
+                } else {
+                    *o++ = *p;
+                }
+            }
+            *o = 0;
+            r.l = jstr(out);
+            free(out);
+        }
+        free(in);
     } else if (strstr(cls, "PlayAssetDeliveryUnityWrapper")) {
         // No Google Play here: every asset pack is inside the APK. Unity
         // waits for the state of its core packs before loading the game's
