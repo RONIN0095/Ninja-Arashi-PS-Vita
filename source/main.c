@@ -70,8 +70,11 @@ static volatile uint64_t last_frame_us = 0;
 static int watchdog_thread(SceSize args, void *argp) {
     while (1) {
         sceKernelDelayThread(1000 * 1000);
-        uint64_t now = sceKernelGetProcessTimeWide();
+        // read the last activity first: a frame finishing in between must not
+        // look like one far in the future (that underflowed into a false alarm)
         uint64_t last = log_last_activity_us > last_frame_us ? log_last_activity_us : last_frame_us;
+        uint64_t now = sceKernelGetProcessTimeWide();
+        if (last > now) last = now;
         static int ticks = 0;
         if (++ticks % 10 == 0) { // every 10 s, also while stuck (doesn't count as progress)
             uint64_t saved = log_last_activity_us;

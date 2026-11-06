@@ -37,49 +37,30 @@ static int io_logged = 0;
 
 
 #include "na_apk.h"
+#define MAP_PATH(p) char mapped_##p[512]; p = na_apk_map_path(p, mapped_##p, sizeof(mapped_##p))
+
+
 /*
- * Unity reads big assets either whole (name) or as name.split0, .split1, ...
- * and prefers the splits when they exist. Reading across the splits went
- * wrong here (it read split1 and then split3), which left the title picture,
- * the cutscenes and the level scenery mostly zero (black or flat colours).
- * When the joined file is there and as big as all splits together, the
- * splits are hidden, so Unity reads the one file.
+ * Asset file tracing: open/read/lseek/close on Unity's data files and the
+ * APK are logged (with the thread), to find where big textures lose data.
  */
-static const char *hide_split(const char *p, char *out, size_t n) {
-    if (!p) return p;
-    const char *s = strstr(p, ".split");
-    if (!s) return p;
-    const char *d = s + 6;
-    if (!*d) return p;
-    for (const char *q = d; *q; q++)
-        if (*q < '0' || *q > '9') return p;
-    char base[512];
-    size_t bl = (size_t)(s - p);
-    if (bl >= sizeof(base) - 16) return p;
-    memcpy(base, p, bl);
-    base[bl] = 0;
-    struct stat st;
-    if (stat(base, &st) != 0 || !S_ISREG(st.st_mode)) return p;
-    // the joined file must hold all splits
-    long long sum = 0;
-    for (int i = 0; i < 512; i++) {
-        char sp[528];
-        struct stat ss;
-        snprintf(sp, sizeof(sp), "%s.split%d", base, i);
-        if (stat(sp, &ss) != 0) break;
-        sum += ss.st_size;
-    }
-    if (sum != (long long)st.st_size) {
-        static int warned = 0;
-        if (warned++ < 8) l_warn("%s: %lld bytes, its splits %lld: splits kept", base, (long long)st.st_size, sum);
-        return p;
-    }
-    snprintf(out, n, "%s.hidden", p);
-    return out;
+#define MAX_TRACK_FD 256
+static char *fd_names[MAX_TRACK_FD];
+volatile int na_io_trace_left = 4000;
+
+const char *na_io_fd_name(int fd) {
+    return (fd >= 0 && fd < MAX_TRACK_FD) ? fd_names[fd] : NULL;
 }
 
-#define MAP_PATH(p) char mapped_##p[512], hidden_##p[540]; p = na_apk_map_path(p, mapped_##p, sizeof(mapped_##p)); \
-    p = hide_split(p, hidden_##p, sizeof(hidden_##p))
+static void track_fd(int fd, const char *path) {
+    if (fd < 0 || fd >= MAX_TRACK_FD) return;
+    free(fd_names[fd]);
+    fd_names[fd] = NULL;
+    if (path && (strstr(path, "/Data/") || strstr(path, "base.apk"))) {
+        const char *b = strrchr(path, '/');
+        fd_names[fd] = strdup(b ? b + 1 : path);
+    }
+}
 
 FILE * fopen_soloader(const char * filename, const char * mode) {
     MAP_PATH(filename);
@@ -139,7 +120,11 @@ int open_soloader(const char * path, int oflag, ...) {
 
     oflag = oflags_bionic_to_newlib(oflag);
     int ret = open(path, oflag, mode);
-    if (ret >= 0)
+    track_fd(ret, path);
+    if (ret >= 0 && fd_names[ret] && na_io_trace_left > 0) {
+        na_io_trace_left--;
+        l_info("[IO] t%x open(%s): %d", sceKernelGetThreadId(), path, ret);
+    } else if (ret >= 0)
         l_io("open(%s, %x): %i", path, oflag, ret);
     else
         l_warn("open(%s, %x): %i", path, oflag, ret);
@@ -186,6 +171,11 @@ int fclose_soloader(FILE * f) {
 }
 
 int close_soloader(int fd) {
+    if (na_io_fd_name(fd) && na_io_trace_left > 0) {
+        na_io_trace_left--;
+        l_info("[IO] t%x close(%d %s)", sceKernelGetThreadId(), fd, na_io_fd_name(fd));
+    }
+    track_fd(fd, NULL);
     int ret = close(fd);
     l_debug("close(%i): %i", fd, ret);
     return ret;

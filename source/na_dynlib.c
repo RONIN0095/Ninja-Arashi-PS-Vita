@@ -250,14 +250,25 @@ static long sysconf_na(int name) {
 /*
  * Files
  */
+const char *na_io_fd_name(int fd);
+extern volatile int na_io_trace_left;
+
 static long long lseek64_na(int fd, long long off, int whence) {
     long long r = lseek(fd, (off_t)off, whence);
+    if (na_io_fd_name(fd) && na_io_trace_left > 0) {
+        na_io_trace_left--;
+        l_info("[IO] t%x lseek64(%d %s, %lld, %d) = %lld", sceKernelGetThreadId(), fd, na_io_fd_name(fd), off, whence, r);
+    }
     if (r < 0) l_warn("lseek64(%d, %lld, %d): %lld", fd, off, whence, r);
     return r;
 }
 
 static long lseek_na(int fd, long off, int whence) {
     long r = lseek(fd, off, whence);
+    if (na_io_fd_name(fd) && na_io_trace_left > 0) {
+        na_io_trace_left--;
+        l_info("[IO] t%x lseek(%d %s, %ld, %d) = %ld", sceKernelGetThreadId(), fd, na_io_fd_name(fd), off, whence, r);
+    }
     if (r < 0) l_warn("lseek(%d, %ld, %d): %ld", fd, off, whence, r);
     return r;
 }
@@ -366,7 +377,12 @@ static int truncate_na(const char *path, long len) {
 static int io_trace_left = 300;
 
 static long read_na(int fd, void *buf, size_t n) {
+    long pos = na_io_fd_name(fd) ? (long)lseek(fd, 0, SEEK_CUR) : -1;
     long r = read(fd, buf, n);
+    if (na_io_fd_name(fd) && na_io_trace_left > 0) {
+        na_io_trace_left--;
+        l_info("[IO] t%x read(%d %s @%ld, %u) = %ld", sceKernelGetThreadId(), fd, na_io_fd_name(fd), pos, (unsigned)n, r);
+    }
     static int short_logged = 0;
     if (r >= 0 && (size_t)r < n && n >= 65536 && short_logged < 40) {
         short_logged++;
