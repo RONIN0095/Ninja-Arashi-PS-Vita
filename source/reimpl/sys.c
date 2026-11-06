@@ -57,12 +57,9 @@ int clock_gettime_soloader(clockid_t clock_id, struct timespec * tp) {
         case BIONIC_CLOCK_REALTIME_COARSE:
         case BIONIC_CLOCK_REALTIME_ALARM:
         case BIONIC_CLOCK_TAI: {
-            SceRtcTick tick;
-            sceRtcGetCurrentTick(&tick);
-            tick.tick -= __epoch;
-
-            tp->tv_sec = (tick.tick / 1000000);
-            tp->tv_nsec = ((tick.tick - (tp->tv_sec * 1000000)) * 1000);
+            // newlib's clock: pthread_cond_timedwait/sem_timedwait deadlines
+            // are measured against it, so the game's deadlines must be too
+            clock_gettime(CLOCK_REALTIME, tp);
             break;
         }
         default:

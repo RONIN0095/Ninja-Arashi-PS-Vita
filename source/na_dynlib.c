@@ -983,28 +983,25 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
         return -1;
     }
 
-    struct timespec abs, now;
+    // Deadline in process time (microseconds), 0 = none
+    uint64_t start = sceKernelGetProcessTimeWide(), deadline = 0;
     if (timeout) {
-        clock_gettime_soloader(0 /* CLOCK_REALTIME */, &now);
+        int64_t rel_us;
         if (cmd == FUTEX_WAIT) {
-            // relative timeout
-            abs.tv_sec = now.tv_sec + timeout->tv_sec;
-            abs.tv_nsec = now.tv_nsec + timeout->tv_nsec;
+            rel_us = (int64_t)timeout->tv_sec * 1000000LL + timeout->tv_nsec / 1000;
         } else if (op & FUTEX_CLOCK_REALTIME) {
-            abs = *timeout;
+            struct timespec now;
+            clock_gettime_soloader(0 /* CLOCK_REALTIME */, &now);
+            rel_us = (int64_t)(timeout->tv_sec - now.tv_sec) * 1000000LL + (timeout->tv_nsec - now.tv_nsec) / 1000;
         } else {
-            // absolute CLOCK_MONOTONIC deadline
-            struct timespec mono;
-            clock_gettime_soloader(1 /* CLOCK_MONOTONIC */, &mono);
-            int64_t d = (int64_t)(timeout->tv_sec - mono.tv_sec) * 1000000000LL + (timeout->tv_nsec - mono.tv_nsec);
-            if (d < 0) d = 0;
-            abs.tv_sec = now.tv_sec + d / 1000000000LL;
-            abs.tv_nsec = now.tv_nsec + d % 1000000000LL;
+            // absolute CLOCK_MONOTONIC, which is process time here
+            rel_us = (int64_t)timeout->tv_sec * 1000000LL + timeout->tv_nsec / 1000 - (int64_t)start;
         }
-        if (abs.tv_nsec >= 1000000000L) {
-            abs.tv_sec++;
-            abs.tv_nsec -= 1000000000L;
+        if (rel_us <= 0) {
+            errno = ETIMEDOUT;
+            return -1;
         }
+        deadline = start + rel_us;
     }
 
     pthread_mutex_lock(&futex_lock);
@@ -1013,12 +1010,32 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
         errno = EAGAIN;
         return -1;
     }
+    // Wait in slices of at most 50 ms and look at the value in between, so a
+    // lost wakeup costs 50 ms instead of a hang (returning early is allowed).
+    // The slice's deadline uses newlib's CLOCK_REALTIME, the clock
+    // pthread_cond_timedwait measures against.
     na_thread_wait_begin(timeout ? "futex(t)" : "futex", (const void *)addr, val);
-    int r = timeout ? pthread_cond_timedwait(futex_bucket(addr), &futex_lock, &abs)
-                    : pthread_cond_wait(futex_bucket(addr), &futex_lock);
+    int timed_out = 0;
+    while (1) {
+        uint64_t now_us = sceKernelGetProcessTimeWide();
+        if (deadline && now_us >= deadline) {
+            timed_out = 1;
+            break;
+        }
+        uint64_t slice = 50000;
+        if (deadline && deadline - now_us < slice) slice = deadline - now_us;
+        struct timespec abs;
+        clock_gettime(CLOCK_REALTIME, &abs);
+        abs.tv_nsec += (long)(slice % 1000000) * 1000;
+        abs.tv_sec += slice / 1000000 + abs.tv_nsec / 1000000000L;
+        abs.tv_nsec %= 1000000000L;
+        int r = pthread_cond_timedwait(futex_bucket(addr), &futex_lock, &abs);
+        if (r != ETIMEDOUT) break;   // woken
+        if (*addr != val) break;     // changed without a wake we saw
+    }
     na_thread_wait_end();
     pthread_mutex_unlock(&futex_lock);
-    if (r == ETIMEDOUT) {
+    if (timed_out) {
         errno = ETIMEDOUT;
         return -1;
     }
