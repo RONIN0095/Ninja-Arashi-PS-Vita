@@ -1084,24 +1084,38 @@ static void glBlendFuncSeparate_na(GLenum sr, GLenum dr, GLenum sa, GLenum da) {
  * alive until another program is made current. vitaGL frees it at once and
  * hands its id to the next glCreateProgram; Unity deletes shaders while
  * switching scenes (cutscene: every draw then used a program slot vitaGL
- * had cleared). The first program events after the first scene change are
- * logged.
+ * had cleared). Program and shader lifetime events are logged.
  */
 static GLuint pending_delete = 0;
 static int prog_events = 0;
 #define PROG_EVENT(...) do { \
-        if (na_egl_swap_count >= 300 && prog_events < 200) { prog_events++; l_info("[GL] " __VA_ARGS__); } \
+        if (prog_events < 600) { prog_events++; l_info("[GL] " __VA_ARGS__); } \
     } while (0)
 
+int vglCurrentProgramDrawable(char *info, int info_size); // extras/patches/vitagl-zz-program-check.patch
+
 static void glUseProgram_na(GLuint p) {
-    if (p != cur_program) PROG_EVENT("glUseProgram(%u)", p);
     cur_program = p;
     glUseProgram(p);
+    if (p) {
+        char info[160];
+        if (!vglCurrentProgramDrawable(info, sizeof(info))) PROG_EVENT("glUseProgram(%u): %s", p, info);
+    }
     if (pending_delete && pending_delete != p) {
         PROG_EVENT("deferred glDeleteProgram(%u)", pending_delete);
         glDeleteProgram(pending_delete);
         pending_delete = 0;
     }
+}
+
+static void glAttachShader_na(GLuint p, GLuint sh) {
+    PROG_EVENT("glAttachShader(%u, %u)", p, sh);
+    glAttachShader(p, sh);
+}
+
+static void glDeleteShader_na(GLuint sh) {
+    PROG_EVENT("glDeleteShader(%u)", sh);
+    glDeleteShader(sh);
 }
 
 static GLuint glCreateProgram_na(void) {
@@ -1468,7 +1482,7 @@ static const gl_entry gl_table[] = {
     { "glDrawElementsInstancedBaseVertexEXT", (void *)&glDrawElementsInstancedBaseVertex_na },
     { "glDrawElementsInstancedBaseVertexOES", (void *)&glDrawElementsInstancedBaseVertex_na },
     E(glDrawArrays), E(glDrawArraysInstanced), E(glDrawElements), E(glDrawElementsBaseVertex),
-    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCreateProgram), E(glCompileShader), E(glBindFramebuffer),
+    E(glDrawElementsInstanced), E(glUseProgram), E(glLinkProgram), E(glDeleteProgram), E(glCreateProgram), E(glAttachShader), E(glDeleteShader), E(glCompileShader), E(glBindFramebuffer),
     E(glBindAttribLocation), E(glGetUniformLocation), E(glUniform4fv), E(glUniformMatrix4fv), E(glUniform1i),
     E(glBindBuffer), E(glDeleteBuffers), E(glBufferData), E(glBufferSubData), E(glMapBufferRange),
     { "glMapBufferRangeEXT", (void *)&glMapBufferRange_na }, E(glUnmapBuffer),
