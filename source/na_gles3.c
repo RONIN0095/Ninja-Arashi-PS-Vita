@@ -69,6 +69,7 @@ static void check_empty_textures(void) {
     }
 }
 static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h);
+static void note_big_upload(GLenum target, GLsizei w, GLsizei h);
 #include "utils/logger.h"
 
 #ifndef GL_MAJOR_VERSION
