@@ -381,7 +381,11 @@ static long read_na(int fd, void *buf, size_t n) {
     long r = read(fd, buf, n);
     if (na_io_fd_name(fd) && na_io_trace_left > 0) {
         na_io_trace_left--;
-        l_info("[IO] t%x read(%d %s @%ld, %u) = %ld", sceKernelGetThreadId(), fd, na_io_fd_name(fd), pos, (unsigned)n, r);
+        unsigned zero = 0, words = 0;
+        for (long i = 0; i + 4 <= r; i += 64, words++)
+            if (*(const uint32_t *)((const uint8_t *)buf + i) == 0) zero++;
+        l_info("[IO] t%x read(%d %s @%ld, %u) = %ld, %u%% zero", sceKernelGetThreadId(), fd, na_io_fd_name(fd), pos,
+               (unsigned)n, r, words ? zero * 100 / words : 0);
     }
     static int short_logged = 0;
     if (r >= 0 && (size_t)r < n && n >= 65536 && short_logged < 40) {
