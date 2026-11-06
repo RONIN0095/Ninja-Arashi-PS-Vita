@@ -1015,10 +1015,6 @@ static void glDisable_na(GLenum cap) {
 
 static void glEnable_na(GLenum cap) {
     if (cap == GL_BLEND) blend_on = 1;
-    if (cap == GL_DEPTH_TEST) { // stencil stays: UI masks need it (run 36: no change without either)
-        glDisable(cap);
-        return;
-    }
     glEnable(cap);
 }
 
