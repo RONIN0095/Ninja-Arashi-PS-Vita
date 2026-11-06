@@ -1353,6 +1353,7 @@ static void *element_buffer(void) { return (void *)cur_vao->index_array_unit; }
 extern volatile int na_egl_swap_count; // na_egl.c
 
 static GLuint cur_program = 0;
+#define MAX_PROGS 4096
 static int draw_no = 0, draws_traced = 0, bad_draws = 0;
 static uint32_t first_vertex = 0;
 
@@ -1422,8 +1423,13 @@ static void glBindAttribLocation_na(GLuint p, GLuint idx, const GLchar *name) {
     glBindAttribLocation(p, idx, name);
 }
 
+// last ObjectToWorld matrix per program, for the frame trace
+static GLint prog_o2w_loc[MAX_PROGS];
+static float prog_o2w[MAX_PROGS][16];
+
 static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
     GLint r = glGetUniformLocation(p, name);
+    if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_ObjectToWorld") == 0) prog_o2w_loc[p] = r;
     LOG_CALL("glGetUniformLocation(%u, %s) = %d", p, name, r);
     return r;
 }
@@ -1431,6 +1437,8 @@ static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
 static void glUniform4fv_na(GLint loc, GLsizei count, const GLfloat *v) {
     LOG_CALL("glUniform4fv(%d, %d): %.3f %.3f %.3f %.3f%s", loc, count, v[0], v[1], v[2], v[3],
              count > 1 ? " ..." : "");
+    if (count == 4 && cur_program < MAX_PROGS && prog_o2w_loc[cur_program] == loc && loc)
+        memcpy(prog_o2w[cur_program], v, sizeof(prog_o2w[0]));
     glUniform4fv(loc, count, v);
 }
 
@@ -1445,7 +1453,6 @@ static void glUniform1i_na(GLint loc, GLint v) {
 }
 
 // vitaGL crashes drawing with a program that never linked (no vertex shader attached)
-#define MAX_PROGS 4096
 static uint8_t prog_linked[MAX_PROGS];
 static uint8_t prog_shadow[MAX_PROGS]; // shadow caster programs (no shadows on the Vita)
 
@@ -1558,6 +1565,8 @@ static uint32_t max_index(const void *p, GLsizei count, GLenum type) {
 }
 
 // Returns 1 if the draw stays inside its buffers; desc gets a short description.
+static float pos_lo[3], pos_hi[3]; // vertex position range of the last checked draw
+
 static int check_draw(GLsizei count, GLenum type, const void *indices, GLint base, GLint first, int elements,
                       char *desc, size_t desc_size) {
     if (count <= 0) return 0;
@@ -1622,6 +1631,34 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
             return 0;
         }
     }
+    // Small dynamic meshes (text popups like "+38", particles) now and then
+    // come with garbage positions: one vertex far away and a letter is drawn
+    // as a huge triangle over the screen. Look at their positions and skip
+    // draws with impossible values.
+    pos_lo[0] = pos_lo[1] = pos_lo[2] = 0;
+    pos_hi[0] = pos_hi[1] = pos_hi[2] = 0;
+    if ((state & 1) && last < 256 && cur_vao->vertex_attrib_vbo[0] &&
+        cur_vao->vertex_attrib_config[0].format == 9 /* F32 */ && cur_vao->vertex_attrib_config[0].componentCount >= 2) {
+        vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
+        uint32_t off = cur_vao->vertex_attrib_offsets[0], stride = cur_vao->vertex_stream_config[0].stride;
+        int comps = cur_vao->vertex_attrib_config[0].componentCount > 3 ? 3 : cur_vao->vertex_attrib_config[0].componentCount;
+        int bad = 0;
+        for (uint32_t v = 0; v <= last; v++) {
+            const float *f = (const float *)((const uint8_t *)vb->ptr + off + v * stride);
+            for (int c = 0; c < comps; c++) {
+                float x = f[c];
+                if (x != x || x > 1e6f || x < -1e6f) bad = 1;
+                if (v == 0 || x < pos_lo[c]) pos_lo[c] = x;
+                if (v == 0 || x > pos_hi[c]) pos_hi[c] = x;
+            }
+        }
+        if (bad) {
+            if (bad_draws++ < 40)
+                l_warn("[GL] draw %d skipped (prog %u): impossible vertex positions (%g..%g, %g..%g)", draw_no,
+                       cur_program, pos_lo[0], pos_hi[0], pos_lo[1], pos_hi[1]);
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -1653,13 +1690,16 @@ static void traced(const char *what, const char *desc) {
         }
     }
     // first vertex position (attribute 0, floats) and depth state
-    char pos[64] = "";
+    char pos[200] = "";
     if (cur_vao->vertex_attrib_state & 1) {
         vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
         uint32_t off = cur_vao->vertex_attrib_offsets[0] + first_vertex * cur_vao->vertex_stream_config[0].stride;
         if (vb && vb->ptr && off + 12 <= (uint32_t)vb->size) {
             const float *f = (const float *)((const uint8_t *)vb->ptr + off);
-            snprintf(pos, sizeof(pos), ", pos %.2f/%.2f/%.2f", f[0], f[1], f[2]);
+            const float *m = cur_program < MAX_PROGS ? prog_o2w[cur_program] : NULL;
+            snprintf(pos, sizeof(pos), ", pos %.2f/%.2f/%.2f (x %.1f..%.1f, y %.1f..%.1f; o2w scale %.2f/%.2f move %.1f/%.1f/%.1f)",
+                     f[0], f[1], f[2], pos_lo[0], pos_hi[0], pos_lo[1], pos_hi[1], m ? m[0] : 0, m ? m[5] : 0,
+                     m ? m[12] : 0, m ? m[13] : 0, m ? m[14] : 0);
         }
     }
     GLint dfunc = 0;
