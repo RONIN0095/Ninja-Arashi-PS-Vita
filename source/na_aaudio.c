@@ -17,6 +17,7 @@
  */
 
 #include "na_aaudio.h"
+#include "na_threads.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -99,6 +100,7 @@ static void convert(const stream *s, const void *src, int16_t *dst, int frames) 
 
 static int audio_thread(SceSize args, void *argp) {
     stream *s = *(stream **)argp;
+    na_thread_register("aaudio", (void *)audio_thread);
     int bps = bytes_per_sample(s->cfg.format) * s->cfg.channels;
     void *cbuf = calloc(GRAIN, bps);
     int16_t *out = calloc(GRAIN * 2, sizeof(int16_t));

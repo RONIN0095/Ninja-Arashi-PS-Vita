@@ -33,6 +33,7 @@
 #include "na_egl.h"
 #include "na_input.h"
 #include "na_looper.h"
+#include "na_threads.h"
 
 void na_java_tick(void); // na_java.c
 void na_gl_log_memory(void); // na_gles3.c
@@ -88,6 +89,7 @@ static int watchdog_thread(SceSize args, void *argp) {
             if (combo_s >= 3) l_fatal("L+R+SELECT: crashing on purpose for a core dump.");
             else l_fatal("Watchdog: no progress for 45 s, crashing on purpose for a core dump.");
             na_gl_log_memory();
+            na_threads_report();
             sceKernelDelayThread(200 * 1000);
             kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
             *(volatile int *)0 = 0;
@@ -143,6 +145,7 @@ int main() {
     SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100 + 10, 0x4000, 0, 0, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
 
+    na_thread_register("main", (void *)main);
     na_unity_start();
 
     int frame = 0;

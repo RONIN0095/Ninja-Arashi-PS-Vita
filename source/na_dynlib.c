@@ -45,6 +45,7 @@
 #include <SLES/OpenSLES_Android.h>
 
 #include "na_modules.h"
+#include "na_threads.h"
 #include "na_apk.h"
 #include "na_android.h"
 #include "na_egl.h"
@@ -1012,8 +1013,10 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
         errno = EAGAIN;
         return -1;
     }
+    na_thread_wait_begin(timeout ? "futex(t)" : "futex", (const void *)addr, val);
     int r = timeout ? pthread_cond_timedwait(futex_bucket(addr), &futex_lock, &abs)
                     : pthread_cond_wait(futex_bucket(addr), &futex_lock);
+    na_thread_wait_end();
     pthread_mutex_unlock(&futex_lock);
     if (r == ETIMEDOUT) {
         errno = ETIMEDOUT;

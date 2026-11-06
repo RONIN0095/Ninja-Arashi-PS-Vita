@@ -245,11 +245,14 @@ PTHR_INLINE int _cond_t_static_init(pthread_cond_t_bionic * cond, const pthread_
     return ret;
 }
 
+#include "na_threads.h"
+
 typedef struct { void *(*start)(void *); void *param; } na_tramp;
 
 static void *thread_tramp(void *p) {
     na_tramp t = *(na_tramp *) p;
     free(p);
+    na_thread_register("pthread", (void *)t.start);
     return t.start(t.param);
 }
 
