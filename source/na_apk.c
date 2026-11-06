@@ -35,12 +35,34 @@ typedef struct {
     uint32_t local_offset;
     uint32_t comp_size;
     uint32_t size;
+    uint32_t crc;
     uint16_t method;
+    uint8_t verified; // the extracted copy's CRC was checked
 } apk_entry;
 
 static apk_entry *entries = NULL;
 static int n_entries = 0;
 static int loaded = 0;
+
+/*
+ * Extracted copies of game data are checked against the APK's CRC32 once:
+ * on the test Vita the asset split files had the right sizes but were
+ * mostly zeros (an extraction that stopped half way, or a bad copy), so the
+ * title picture, cutscenes and level scenery loaded as black or flat colour.
+ * Files that fail the check are extracted again.
+ */
+#define CRC_OK_PATH DATA_PATH "crc_ok.txt"
+
+static uint32_t file_crc(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    static uint8_t buf[128 * 1024];
+    uLong c = crc32(0L, Z_NULL, 0);
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) c = crc32(c, buf, n);
+    fclose(f);
+    return (uint32_t)c;
+}
 
 static uint16_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24); }
@@ -92,6 +114,7 @@ static int load_directory(void) {
         e->method = rd16(p + 10);
         e->comp_size = rd32(p + 20);
         e->size = rd32(p + 24);
+        e->crc = rd32(p + 16);
         e->local_offset = rd32(p + 42);
         e->name = malloc(name_len + 1);
         memcpy(e->name, p + 46, name_len);
@@ -100,6 +123,23 @@ static int load_directory(void) {
     }
     free(cd);
     l_info("[apk] %d entries in %s", n_entries, APK_PATH);
+    // extracted files already checked in earlier runs
+    FILE *ok = fopen(CRC_OK_PATH, "r");
+    if (ok) {
+        char line[512];
+        int n = 0;
+        while (fgets(line, sizeof(line), ok)) {
+            line[strcspn(line, "\r\n")] = 0;
+            for (int i = 0; i < n_entries; i++)
+                if (strcmp(entries[i].name, line) == 0) {
+                    entries[i].verified = 1;
+                    n++;
+                    break;
+                }
+        }
+        fclose(ok);
+        l_info("[apk] %d extracted files checked before", n);
+    }
     return n_entries > 0;
 }
 
@@ -365,7 +405,22 @@ const char *na_apk_map_path(const char *path, char *buf, size_t buflen) {
             if (stat(buf, &st) != 0 || (uint32_t)st.st_size != e->size) {
                 l_info("[apk] extracting %s (%u KB)", entry, (unsigned)(e->size / 1024));
                 if (extract(e, buf) < 0) l_error("[apk] extracting %s failed", entry);
+            } else if (!e->verified && strncmp(entry, "assets/", 7) == 0) {
+                uint32_t c = file_crc(buf);
+                if (c != e->crc) {
+                    l_warn("[apk] %s: CRC %08x, APK has %08x: extracting again", entry, (unsigned)c, (unsigned)e->crc);
+                    if (extract(e, buf) < 0) l_error("[apk] extracting %s failed", entry);
+                    c = file_crc(buf);
+                }
+                if (c == e->crc) {
+                    FILE *ok = fopen(CRC_OK_PATH, "a");
+                    if (ok) {
+                        fprintf(ok, "%s\n", entry);
+                        fclose(ok);
+                    }
+                }
             }
+            e->verified = 1;
         } else if (is_dir_in_apk(entry)) {
             if (stat(buf, &st) != 0) {
                 mkdirs(buf);
