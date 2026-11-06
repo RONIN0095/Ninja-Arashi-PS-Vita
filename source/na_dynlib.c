@@ -46,6 +46,7 @@
 
 #include "na_modules.h"
 #include "na_threads.h"
+#include "na_stats.h"
 #include "na_apk.h"
 #include "na_android.h"
 #include "na_egl.h"
@@ -378,7 +379,10 @@ static int io_trace_left = 300;
 
 static long read_na(int fd, void *buf, size_t n) {
     long pos = na_io_fd_name(fd) ? (long)lseek(fd, 0, SEEK_CUR) : -1;
+    uint64_t t0 = sceKernelGetProcessTimeWide();
     long r = read(fd, buf, n);
+    na_stats.read_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    if (r > 0) na_stats.read_kb += (uint32_t)(r / 1024);
     /*
      * A read that stops at the end of a file leaves the Vita's file position
      * past the end (by what was asked minus 256 KB: reading 3 MB from a 1 MB

@@ -29,6 +29,7 @@
 
 #include <vitaGL.h>
 #include <psp2/gxm.h>
+#include <psp2/kernel/processmgr.h>
 
 #include "na_shaders.h"
 
@@ -38,6 +39,7 @@ static int blend_on = 0; // GL_BLEND, for the draw trace
 static GLenum blend_f[4] = { GL_ONE, GL_ZERO, GL_ONE, GL_ZERO }; // current blend factors
 static GLuint bound_draw_fb, bound_read_fb; // (screenshot code)
 #include "utils/logger.h"
+#include "na_stats.h"
 // Bound 2D textures per unit and texture sizes, for the draw trace
 static GLuint unit_tex[16];
 static int active_unit = 0;
@@ -647,7 +649,7 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
     }
 }
 
-static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+static void glCompressedTexSubImage2D_na_inner(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
                                          GLenum format, GLsizei size, const void *data) {
     if (level > 0) return; // mipmaps are off
     const void *raw = data;
@@ -672,6 +674,13 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
         if (warned++ < 8)
             l_warn("glCompressedTexSubImage2D: partial update (%d,%d %dx%d of %dx%d) ignored", x, y, w, h, lw, lh);
     }
+}
+static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+                                         GLenum format, GLsizei size, const void *data) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glCompressedTexSubImage2D_na_inner(target, level, x, y, w, h, format, size, data);
+    na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.tex_n++;
 }
 
 
@@ -951,7 +960,7 @@ static void glSamplerParameterf_na(GLuint smp, GLenum pname, GLfloat v) {
     glSamplerParameterf(smp, pname, v);
 }
 
-static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
+static void glTexImage2D_na_inner(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
                             GLenum type, const void *data) {
     if (level > 0) return;
     note_texture(target, w, h, ifmt);
@@ -961,14 +970,28 @@ static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, G
     check_upload("glTexImage2D", ifmt, w, h);
     if (unpack_ptr(data)) note_filled(target);
 }
+static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
+                            GLenum type, const void *data) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glTexImage2D_na_inner(target, level, ifmt, w, h, border, format, type, data);
+    na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.tex_n++;
+}
 
-static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
+static void glTexSubImage2D_na_inner(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
                                GLenum type, const void *data) {
     if (level > 0) return;
     data = unpack_ptr(data);
     if (!data) return;
     glTexSubImage2D(target, level, x, y, w, h, format, type, data);
     note_filled(target);
+}
+static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
+                               GLenum type, const void *data) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glTexSubImage2D_na_inner(target, level, x, y, w, h, format, type, data);
+    na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.tex_n++;
 }
 
 /*
@@ -1026,7 +1049,7 @@ void na_gl_log_memory(void) {
            (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024));
 }
 
-static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
+static void glCompressedTexImage2D_na_inner(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                       GLsizei size, const void *data) {
     if (level > 0) return;
     note_texture(target, w, h, ifmt);
@@ -1042,6 +1065,13 @@ static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, G
     free(converted);
     note_filled(target);
     note_big_upload(target, w, h);
+}
+static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
+                                      GLsizei size, const void *data) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glCompressedTexImage2D_na_inner(target, level, ifmt, w, h, border, size, data);
+    na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.tex_n++;
 }
 
 static void glGenerateMipmap_na(GLenum target) {}
@@ -1435,7 +1465,7 @@ static void glCompileShader_na(GLuint s) {
     }
 }
 
-static void glLinkProgram_na(GLuint p) {
+static void glLinkProgram_na_inner(GLuint p) {
     PROG_EVENT("glLinkProgram(%u)", p);
     glLinkProgram(p);
     GLint ok = 0;
@@ -1480,6 +1510,12 @@ static void glLinkProgram_na(GLuint p) {
         static int warned = 0;
         if (warned++ < 32) l_warn("[GL] glLinkProgram(%u) failed", p);
     }
+}
+static void glLinkProgram_na(GLuint p) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glLinkProgram_na_inner(p);
+    na_stats.link_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.link_n++;
 }
 
 static void glDeleteProgram_na(GLuint p) {
@@ -1744,7 +1780,9 @@ static void *glFenceSync_na(GLenum cond, GLbitfield flags) {
 static int fence_wait(na_fence *f) {
     if (!f || f->done) return 1;
     if (f->swap < na_egl_swap_count) {
+        uint64_t t0 = sceKernelGetProcessTimeWide();
         glFinish();
+        na_stats.finish_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
         f->done = 1;
         fence_waits++;
     }

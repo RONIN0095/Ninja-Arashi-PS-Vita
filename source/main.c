@@ -35,6 +35,8 @@
 #include "na_looper.h"
 #include "na_threads.h"
 #include "na_hud.h"
+#include "na_stats.h"
+volatile na_frame_stats na_stats;
 
 void na_java_tick(void); // na_java.c
 void na_gl_log_memory(void); // na_gles3.c
@@ -173,7 +175,19 @@ int main() {
             sceIoRemove(DATA_PATH "sound_probe.txt"); // sound setup went fine (see dynlib.c)
         na_hud_tick(frame);
         frame++;
-        last_frame_us = sceKernelGetProcessTimeWide();
+        uint64_t now_us = sceKernelGetProcessTimeWide();
+        // Hitches: frames over 50 ms, with what they spent their time on
+        static int hitches = 0;
+        uint32_t ft = last_frame_us ? (uint32_t)((now_us - last_frame_us) / 1000) : 0;
+        if (ft > 50 && frame > 300 && hitches < 300) {
+            hitches++;
+            l_info("[HITCH] frame %d: %u ms (textures %u in %u ms, shaders %u in %u ms, reads %u KB in %u ms, "
+                   "swap %u ms, fence waits %u ms)", frame, ft, na_stats.tex_n, na_stats.tex_us / 1000,
+                   na_stats.link_n, na_stats.link_us / 1000, na_stats.read_kb, na_stats.read_us / 1000,
+                   na_stats.swap_us / 1000, na_stats.finish_us / 1000);
+        }
+        memset((void *)&na_stats, 0, sizeof(na_stats));
+        last_frame_us = now_us;
     }
 
     sceKernelExitDeleteThread(0);
