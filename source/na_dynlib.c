@@ -1045,8 +1045,8 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
         errno = EAGAIN;
         return -1;
     }
-    // Wait in slices of at most 50 ms and look at the value in between, so a
-    // lost wakeup costs 50 ms instead of a hang (returning early is allowed).
+    // Wait in slices of at most 4 ms and look at the value in between, so a
+    // lost wakeup costs 4 ms instead of a hang (returning early is allowed).
     // The slice's deadline uses newlib's CLOCK_REALTIME, the clock
     // pthread_cond_timedwait measures against.
     na_thread_wait_begin(timeout ? "futex(t)" : "futex", (const void *)addr, val);
@@ -1057,7 +1057,7 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
             timed_out = 1;
             break;
         }
-        uint64_t slice = 50000;
+        uint64_t slice = 4000;
         if (deadline && deadline - now_us < slice) slice = deadline - now_us;
         struct timespec abs;
         clock_gettime(CLOCK_REALTIME, &abs);
