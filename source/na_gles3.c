@@ -389,6 +389,9 @@ static int extra_index(GLenum target) {
 }
 
 #define PIXEL_UNPACK_IDX 3
+extern volatile int na_egl_swap_count;
+extern volatile int na_trace_swap;
+#define TRACING_FRAME() (na_egl_swap_count == na_trace_swap)
 static int upload_logs = 0; // see log_upload
 
 static void glBindBuffer_na(GLenum target, GLuint buffer) {
@@ -433,6 +436,7 @@ static void glDeleteBuffers_na(GLsizei n, const GLuint *ids) {
     } while (0)
 
 static void glBufferData_na(GLenum target, GLsizei size, const void *data, GLenum usage) {
+    if (TRACING_FRAME()) l_info("[GL] BufferData(0x%x, %d, %p, 0x%x)", target, size, data, usage);
     if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferData size %d data %p usage 0x%x", extra_bound[PIXEL_UNPACK_IDX], size, data, usage); }
 #define OP(t) glBufferData(t, size, data, usage)
     WITH_TARGET(target, OP);
@@ -440,6 +444,7 @@ static void glBufferData_na(GLenum target, GLsizei size, const void *data, GLenu
 }
 
 static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, const void *data) {
+    if (TRACING_FRAME()) l_info("[GL] BufferSubData(0x%x, +%d, %d)", target, (int)off, (int)size);
     if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferSubData off %d size %d data %p", extra_bound[PIXEL_UNPACK_IDX], (int)off, (int)size, data); }
 #define OP(t) glBufferSubData(t, off, size, data)
     WITH_TARGET(target, OP);
@@ -449,6 +454,7 @@ static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, con
 static void *element_buffer(void); // the bound index buffer (needs vitaGL's VAO, below)
 
 static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
+    if (TRACING_FRAME()) l_info("[GL] MapBufferRange(0x%x, +%d, %d, access 0x%x)", target, (int)off, (int)len, access);
     void *r = NULL;
     // MAP_INVALIDATE_BUFFER: the old contents may go; vitaGL would hand out
     // the memory the GPU is still drawing from, so give the buffer new
@@ -472,6 +478,7 @@ static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GL
 }
 
 static GLboolean glUnmapBuffer_na(GLenum target) {
+    if (TRACING_FRAME()) l_info("[GL] UnmapBuffer(0x%x)", target);
     GLboolean r = GL_FALSE;
     if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: UnmapBuffer", extra_bound[PIXEL_UNPACK_IDX]); }
 #define OP(t) r = glUnmapBuffer(t)
