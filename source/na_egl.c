@@ -250,7 +250,7 @@ void na_gl_screenshot(int n); // na_gles3.c
 
 EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Debug screenshots: 5 s and 20 s into the game
-    if (na_egl_swap_count == 150 || na_egl_swap_count == 600) na_gl_screenshot(na_egl_swap_count);
+    // (automatic screenshots at swaps 150/600 are off: each took seconds; L+R+DOWN still saves one)
     // frame trace requested with L+R+DOWN: this frame's draws were logged
     extern volatile int na_trace_swap;
     extern volatile int na_trace_request;

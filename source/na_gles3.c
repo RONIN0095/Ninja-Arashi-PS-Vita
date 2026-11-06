@@ -70,6 +70,7 @@ static void check_empty_textures(void) {
 }
 static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h);
 static void note_big_upload(GLenum target, GLsizei w, GLsizei h);
+static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, const void *data, GLsizei size);
 #include "utils/logger.h"
 
 #ifndef GL_MAJOR_VERSION
@@ -648,7 +649,8 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
     if (x == 0 && y == 0 && w >= lw && h >= lh) {
         void *converted = convert_etc2(&format, &size, &data, w, h);
         glGetError();
-        glCompressedTexImage2D(target, level, format, w, h, 0, size, data);
+        if (!etc2_cached_upload(target, format, w, h, data, size))
+            glCompressedTexImage2D(target, level, format, w, h, 0, size, data);
         check_upload("glCompressedTexSubImage2D", format, w, h);
         free(converted);
         note_filled(target);
@@ -661,13 +663,75 @@ static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GL
 }
 
 
+
+/*
+ * ETC2 texture cache. vitaGL turns ETC2 into DXT5 on the CPU (decode, then
+ * stb_dxt), which made loading slow: a 2048x2048 texture took about 1.8 s.
+ * The DXT5 result of each ETC2 texture is kept in ux0:data/ninjaarashi/
+ * texcache, named after the CRC32 and size of the ETC2 data; later loads
+ * upload it directly (vitaGL only swizzles DXT5 on the GPU).
+ */
+#include <zlib.h>
+#include <sys/stat.h>
+void eac_decode(uint8_t *in, uint8_t *out, const int w, const int h, int flag); // vitaGL
+#define EAC_ETC2 0
+void stb_compress_dxt_block(unsigned char *dest, const unsigned char *src, int alpha, int mode);
+
+static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, const void *data, GLsizei size) {
+    if (target != GL_TEXTURE_2D || fmt != 0x9278 || !data) return 0;
+    if (w < 64 || h < 64 || w > 2048 || h > 2048 || (w & (w - 1)) || (h & (h - 1))) return 0;
+    if (size < w * h) return 0;
+    uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, w * h);
+    char path[128];
+    snprintf(path, sizeof(path), DATA_PATH "texcache/%08x_%dx%d.dxt5", (unsigned)crc, w, h);
+    size_t dsize = (size_t)w * h; // DXT5: one byte per pixel
+    uint8_t *dxt = malloc(dsize);
+    if (!dxt) return 0;
+    static int hits = 0, misses = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        size_t got = fread(dxt, 1, dsize, f);
+        fclose(f);
+        if (got == dsize) {
+            glCompressedTexImage2D(target, 0, 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)dsize, dxt);
+            free(dxt);
+            if (hits++ < 8) l_info("[texcache] hit %s", path);
+            return 1;
+        }
+    }
+    uint8_t *rgba = malloc(dsize * 4);
+    if (!rgba) {
+        free(dxt);
+        return 0;
+    }
+    eac_decode((uint8_t *)data, rgba, w, h, EAC_ETC2);
+    uint8_t block[64], *out = dxt;
+    for (int by = 0; by < h; by += 4)
+        for (int bx = 0; bx < w; bx += 4) {
+            for (int r = 0; r < 4; r++) memcpy(&block[r * 16], &rgba[((by + r) * w + bx) * 4], 16);
+            stb_compress_dxt_block(out, block, 1, 0);
+            out += 16;
+        }
+    free(rgba);
+    glCompressedTexImage2D(target, 0, 0x83F3, w, h, 0, (GLsizei)dsize, dxt);
+    mkdir(DATA_PATH "texcache", 0777);
+    f = fopen(path, "wb");
+    if (f) {
+        fwrite(dxt, 1, dsize, f);
+        fclose(f);
+    }
+    if (misses++ < 8) l_info("[texcache] stored %s", path);
+    free(dxt);
+    return 1;
+}
+
 /*
  * Texture memory dumps: the big ETC2 pictures (title, cutscenes) draw black
  * in large parts although vitaGL's decode + DXT5 path gives the right
  * picture on a PC. The first big textures' GPU memory is written to files
  * right after the upload and again with each screenshot, to compare.
  */
-#define MAX_DUMP_TEX 3
+#define MAX_DUMP_TEX 0 // dumps off (3 to compare texture memory again)
 static GLuint dump_tex[MAX_DUMP_TEX];
 static int n_dump_tex = 0;
 
@@ -909,7 +973,8 @@ static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, G
     if (!data) return;
     void *converted = convert_etc2(&ifmt, &size, &data, w, h);
     glGetError();
-    glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
+    if (!etc2_cached_upload(target, ifmt, w, h, data, size))
+        glCompressedTexImage2D(target, level, ifmt, w, h, border, size, data);
     check_upload("glCompressedTexImage2D", ifmt, w, h);
     free(converted);
     note_filled(target);
@@ -1206,7 +1271,7 @@ static void glBlendFuncSeparate_na(GLenum sr, GLenum dr, GLenum sa, GLenum da) {
     blend_f[0] = sr; blend_f[1] = dr; blend_f[2] = sa; blend_f[3] = da;
     glBlendFuncSeparate(sr, dr, sa, da);
 }
-#define TRACE_FROM_SWAP 650 // just after the second screenshot: the menu is up
+#define TRACE_FROM_SWAP 0x7fffffff // automatic trace off (650: just after the menu is up)
 #define TRACED_DRAWS 120
 
 /*

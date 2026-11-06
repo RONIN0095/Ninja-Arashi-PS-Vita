@@ -107,6 +107,7 @@ set(SOURCES
     source/na_java.c
     source/na_looper.c
     source/na_threads.c
+    source/na_hud.c
     source/na_modules.c
     source/na_shaders.c
     source/na_sles.c

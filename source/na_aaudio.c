@@ -47,7 +47,7 @@ enum {
 };
 
 #define RATE 48000
-#define GRAIN 512 // frames per SceAudio block (multiple of 64)
+#define GRAIN 1024 // frames per SceAudio block (multiple of 64); 21 ms, room for the mixer when the CPU is busy
 
 typedef int32_t (*data_cb_t)(void *stream, void *user, void *audio, int32_t frames);
 typedef void (*error_cb_t)(void *stream, void *user, int32_t error);

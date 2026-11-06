@@ -46,7 +46,7 @@ static int io_logged = 0;
  */
 #define MAX_TRACK_FD 256
 static char *fd_names[MAX_TRACK_FD];
-volatile int na_io_trace_left = 4000;
+volatile int na_io_trace_left = 0; // 4000 to trace asset I/O again
 
 const char *na_io_fd_name(int fd) {
     return (fd >= 0 && fd < MAX_TRACK_FD) ? fd_names[fd] : NULL;

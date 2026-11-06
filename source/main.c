@@ -34,6 +34,7 @@
 #include "na_input.h"
 #include "na_looper.h"
 #include "na_threads.h"
+#include "na_hud.h"
 
 void na_java_tick(void); // na_java.c
 void na_gl_log_memory(void); // na_gles3.c
@@ -168,6 +169,7 @@ int main() {
             sceKernelDelayThread(1000);
         if (frame == 0)
             sceIoRemove(DATA_PATH "sound_probe.txt"); // sound setup went fine (see dynlib.c)
+        na_hud_tick(frame);
         frame++;
         last_frame_us = sceKernelGetProcessTimeWide();
     }
