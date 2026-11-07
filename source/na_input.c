@@ -204,6 +204,21 @@ static void poll_touch(void) {
             now[n_now].y = vpad[k].y;
             n_now++;
         }
+    } else if (na_hud_gdpr_up()) {
+        /*
+         * The privacy pop-up at the start: its X ("do not accept", the
+         * privacy-friendly answer; there is no network anyway) is tapped,
+         * 8 frames down, 22 up, until the pop-up is gone. Canvas/GDPR/
+         * GDPR Popup: 234.6x261.5 at the centre, X at (1,1)+(-20.8,-16.3),
+         * 800x600 reference matched to width (x1.2).
+         */
+        static int gdpr_t = 0;
+        if (gdpr_t++ % 30 < 8 && n_now < MAX_POINTERS) {
+            now[n_now].id = 201;
+            now[n_now].x = SCREEN_W / 2 + (234.6f / 2 - 20.8f) * 1.2f;
+            now[n_now].y = SCREEN_H / 2 - (261.5f / 2 - 16.3f) * 1.2f;
+            n_now++;
+        }
     } else {
         menu_cursor(b, td.reportNum > 0);
         if ((b & SCE_CTRL_CROSS) && n_now < MAX_POINTERS) {

@@ -40,6 +40,12 @@ int na_hud_in_level(void) {
     return in_level;
 }
 
+// The privacy pop-up at the start (Canvas/GDPR/GDPR Popup) is up
+static volatile int gdpr_up = 0;
+int na_hud_gdpr_up(void) {
+    return gdpr_up;
+}
+
 static const char *const parts[] = {
     "Canvas/PlayButton/Left/image",       "Canvas/PlayButton/Right/image",
     "Canvas/PlayButton/Skill/Up/Image",   "Canvas/PlayButton/Skill/Fi/Image",
@@ -116,6 +122,8 @@ void na_hud_tick(int frame) {
     {
         void *a[1] = { string_new("Canvas/PlayButton") };
         in_level = call(m_find, NULL, a) != NULL;
+        a[0] = string_new("Canvas/GDPR/GDPR Popup");
+        gdpr_up = call(m_find, NULL, a) != NULL;
     }
     static int logged = 0;
     int hidden = 0;

@@ -811,6 +811,8 @@ static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, c
     if (target != GL_TEXTURE_2D || fmt != 0x9278 || !data) return 0;
     if (w < 64 || h < 64 || w > 2048 || h > 2048 || (w & (w - 1)) || (h & (h - 1))) return 0;
     if (size < w * h) return 0;
+    // Key: CRC32 of all the ETC2 data. (Samples are not enough: some atlases
+    // differ in a few blocks only; 1 in 8 blocks still mixed up 5 textures.)
     uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, w * h);
     char path[128], zpath[132];
     snprintf(path, sizeof(path), DATA_PATH "texcache/%08x_%dx%d.dxt5", (unsigned)crc, w, h);
@@ -1715,7 +1717,7 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
     // draws with impossible values.
     pos_lo[0] = pos_lo[1] = pos_lo[2] = 0;
     pos_hi[0] = pos_hi[1] = pos_hi[2] = 0;
-    if ((state & 1) && last < 256 && cur_vao->vertex_attrib_vbo[0] &&
+    if ((state & 1) && last < 1024 && cur_vao->vertex_attrib_vbo[0] &&
         cur_vao->vertex_attrib_config[0].format == 9 /* F32 */ && cur_vao->vertex_attrib_config[0].componentCount >= 2) {
         vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
         uint32_t off = cur_vao->vertex_attrib_offsets[0], stride = cur_vao->vertex_stream_config[0].stride;
@@ -2226,6 +2228,7 @@ typedef struct {
     float sx, sy, mx, my;
 } ring_draw;
 static ring_draw *ring;
+static void check_outlier(ring_draw *r);
 static int ring_pos = 0, ring_n = 0;
 
 static void ring_record(int count, uint32_t last) {
@@ -2246,18 +2249,70 @@ static void ring_record(int count, uint32_t last) {
     r->sx = m ? m[0] : 0; r->sy = m ? m[5] : 0; r->mx = m ? m[12] : 0; r->my = m ? m[13] : 0;
     ring_pos = (ring_pos + 1) % RING_DRAWS;
     if (ring_n < RING_DRAWS) ring_n++;
+    check_outlier(r);
 }
 
-void na_gl_dump_recent_draws(void) {
-    if (!ring) return;
-    l_info("[RING] last %d draws (frame, draw, program, texture, indices, last vertex, x range, y range, o2w scale/move):", ring_n);
+static void dump_ring_to(FILE *f) {
     int start = (ring_pos - ring_n + RING_DRAWS) % RING_DRAWS;
     for (int i = 0; i < ring_n; i++) {
         ring_draw *r = &ring[(start + i) % RING_DRAWS];
         GLuint t = r->tex;
-        l_info("[RING] f%d d%d p%u t%u(%dx%d) n%d v%d x %.1f..%.1f y %.1f..%.1f s %.2f/%.2f m %.1f/%.1f", r->swap, r->draw,
-               r->prog, t, t < MAX_TEX_INFO ? tex_info[t].w : 0, t < MAX_TEX_INFO ? tex_info[t].h : 0, r->count, r->last,
-               r->lo[0], r->hi[0], r->lo[1], r->hi[1], r->sx, r->sy, r->mx, r->my);
+        fprintf(f, "f%d d%d p%u t%u(%dx%d) n%d v%d x %.1f..%.1f y %.1f..%.1f s %.2f/%.2f m %.1f/%.1f\n", r->swap, r->draw,
+                r->prog, t, t < MAX_TEX_INFO ? tex_info[t].w : 0, t < MAX_TEX_INFO ? tex_info[t].h : 0, r->count, r->last,
+                r->lo[0], r->hi[0], r->lo[1], r->hi[1], r->sx, r->sy, r->mx, r->my);
     }
+}
+
+// Writes the recent draws to ux0:data/ninjaarashi/glitch_<frame>.txt
+static void dump_ring_file(const char *why) {
+    if (!ring || !ring_n) return;
+    char path[96];
+    snprintf(path, sizeof(path), DATA_PATH "glitch_%d.txt", na_egl_swap_count);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%s\nframe, draw, program, texture, indices, last vertex, x range, y range, o2w scale/move\n", why);
+    dump_ring_to(f);
+    fclose(f);
+    l_warn("[RING] %s: %d recent draws written to %s", why, ring_n, path);
+}
+
+/*
+ * Glitch detection: a draw whose vertices spread much wider than the same
+ * program/texture usually does (a letter of a text popup, a particle quad
+ * stretched over the screen) writes the recent draws to a file at once,
+ * at most every 20 s.
+ */
+#define TYPICAL_N 512
+static struct { uint16_t prog, tex; float size; } typical[TYPICAL_N];
+
+static void check_outlier(ring_draw *r) {
+    if (r->prog < 4 || (r->lo[0] == 0 && r->hi[0] == 0)) return; // programs 1-3: UI/blits
+    float size = r->hi[0] - r->lo[0];
+    if (r->hi[1] - r->lo[1] > size) size = r->hi[1] - r->lo[1];
+    unsigned h = ((unsigned)r->prog * 31 + r->tex) % TYPICAL_N;
+    if (typical[h].prog != r->prog || typical[h].tex != r->tex) {
+        typical[h].prog = r->prog;
+        typical[h].tex = r->tex;
+        typical[h].size = size;
+        return;
+    }
+    float t = typical[h].size;
+    static uint64_t last_dump = 0;
+    if (size > 25.0f && size > t * 6.0f && t > 0.01f) {
+        uint64_t now = sceKernelGetProcessTimeWide();
+        if (now - last_dump > 20000000ULL) {
+            last_dump = now;
+            char why[160];
+            snprintf(why, sizeof(why), "draw %d (program %u, texture %u): size %.1f, usually %.1f", r->draw, r->prog,
+                     r->tex, size, t);
+            dump_ring_file(why);
+        }
+        return; // keep the typical size
+    }
+    typical[h].size = t * 0.95f + size * 0.05f;
+}
+
+void na_gl_dump_recent_draws(void) {
+    dump_ring_file("L+R+DOWN");
     ring_n = 0;
 }
