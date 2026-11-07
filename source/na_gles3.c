@@ -368,10 +368,15 @@ static void glProgramParameteri_na(GLuint p, GLenum pname, GLint v) {}
  */
 extern uint32_t vertex_array_unit; // vitaGL buffers.c
 
-typedef struct { // vitaGL's vbo (shared.h): only the leading fields
+typedef struct { // vitaGL's vbo (shared.h; built without scratch memory)
     void *ptr;
     int32_t size;
+    void *(*alloc_func)(size_t);
+    uint32_t last_frame;
+    uint8_t mapped;
 } vgl_vbo;
+extern uint32_t vgl_framecount; // vitaGL gxm.c
+static int same_frame_maps = 0; // maps of buffers drawn from in the same frame
 
 #define N_EXTRA_TARGETS 10
 static const GLenum extra_targets[N_EXTRA_TARGETS] = {
@@ -482,7 +487,9 @@ static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, con
     if (TRACING_FRAME()) l_info("[GL] BufferSubData(0x%x, +%d, %d)", target, (int)off, (int)size);
     if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferSubData off %d size %d data %p", extra_bound[PIXEL_UNPACK_IDX], (int)off, (int)size, data); }
     vgl_vbo *b = (vgl_vbo *)target_buffer(target);
-    if (b && b->ptr && was_mapped(b) && off >= 0 && off + size <= b->size && data) {
+    // in place only while it is mapped (vitaGL copies a buffer drawn from in
+    // the last frames, which would lose the writes going on through the map)
+    if (b && b->ptr && b->mapped && was_mapped(b) && off >= 0 && off + size <= b->size && data) {
         memcpy((uint8_t *)b->ptr + off, data, size);
         return;
     }
@@ -496,6 +503,11 @@ static void *element_buffer(void); // the bound index buffer (needs vitaGL's VAO
 static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
     if (TRACING_FRAME()) l_info("[GL] MapBufferRange(0x%x, +%d, %d, access 0x%x)", target, (int)off, (int)len, access);
     note_mapped(target_buffer(target));
+    {
+        vgl_vbo *m = (vgl_vbo *)target_buffer(target);
+        if (m && m->last_frame == vgl_framecount && !m->mapped && same_frame_maps++ < 20)
+            l_info("[GL] buffer %p (%d bytes) mapped again in the frame it was drawn from: new memory", m, m->size);
+    }
     void *r = NULL;
     // MAP_INVALIDATE_BUFFER: the old contents may go; vitaGL would hand out
     // the memory the GPU is still drawing from, so give the buffer new
@@ -2249,7 +2261,9 @@ static void ring_record(int count, uint32_t last) {
     r->sx = m ? m[0] : 0; r->sy = m ? m[5] : 0; r->mx = m ? m[12] : 0; r->my = m ? m[13] : 0;
     ring_pos = (ring_pos + 1) % RING_DRAWS;
     if (ring_n < RING_DRAWS) ring_n++;
-    check_outlier(r);
+    // check_outlier(r): off. Its 1 MB dumps froze the game for seconds, and
+    // what it caught were batches of sprites far apart, not broken draws.
+    (void)check_outlier;
 }
 
 static void dump_ring_to(FILE *f) {
