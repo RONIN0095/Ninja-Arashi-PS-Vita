@@ -1476,7 +1476,7 @@ extern volatile int na_egl_swap_count; // na_egl.c
 static GLuint cur_program = 0;
 #define MAX_PROGS 4096
 static int draw_no = 0, draws_traced = 0, bad_draws = 0;
-static uint32_t first_vertex = 0;
+static uint32_t first_vertex = 0, last_vertex = 0;
 
 static void glBlendFunc_na(GLenum s, GLenum d) {
     blend_f[0] = blend_f[2] = s; blend_f[1] = blend_f[3] = d;
@@ -1733,6 +1733,7 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
         first_vertex = first;
     }
     snprintf(desc, desc_size, "count %d, last vertex %u", count, last);
+    last_vertex = last;
 
     uint32_t state = cur_vao->vertex_attrib_state;
     for (int i = 0; i < 16; i++) {
@@ -1832,6 +1833,36 @@ static void traced(const char *what, const char *desc) {
                      m ? m[12] : 0, m ? m[13] : 0, m ? m[14] : 0);
         }
     }
+    // where the vertices end up on screen (clip space, from the program's
+    // ObjectToWorld and MatrixVP) and the culling
+    char clip[160] = "";
+    if ((cur_vao->vertex_attrib_state & 1) && cur_program < MAX_PROGS && prog_vp_loc[cur_program] &&
+        prog_o2w_loc[cur_program] && cur_vao->vertex_attrib_config[0].format == 9 &&
+        cur_vao->vertex_attrib_config[0].componentCount >= 3) {
+        vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
+        uint32_t off = cur_vao->vertex_attrib_offsets[0], stride = cur_vao->vertex_stream_config[0].stride;
+        const float *m = prog_o2w[cur_program], *vp = prog_vp[cur_program];
+        float lo[4] = {1e30f, 1e30f, 1e30f, 1e30f}, hi[4] = {-1e30f, -1e30f, -1e30f, -1e30f};
+        uint32_t end = last_vertex > 4095 ? 4095 : last_vertex;
+        if (vb && vb->ptr && off + end * stride + 12 <= (uint32_t)vb->size) {
+            for (uint32_t v = 0; v <= end; v++) {
+                const float *f = (const float *)((const uint8_t *)vb->ptr + off + v * stride);
+                float wp[4], c[4];
+                for (int k = 0; k < 4; k++) wp[k] = m[k] * f[0] + m[4 + k] * f[1] + m[8 + k] * f[2] + m[12 + k];
+                for (int k = 0; k < 4; k++) c[k] = vp[k] * wp[0] + vp[4 + k] * wp[1] + vp[8 + k] * wp[2] + vp[12 + k] * wp[3];
+                float q[4] = {c[0] / c[3], c[1] / c[3], c[2] / c[3], c[3]};
+                for (int k = 0; k < 4; k++) {
+                    if (q[k] < lo[k]) lo[k] = q[k];
+                    if (q[k] > hi[k]) hi[k] = q[k];
+                }
+            }
+            snprintf(clip, sizeof(clip), ", ndc x %.2f..%.2f y %.2f..%.2f z %.3f..%.3f w %.2f..%.2f", lo[0], hi[0], lo[1],
+                     hi[1], lo[2], hi[2], lo[3], hi[3]);
+        }
+    }
+    char cull[48];
+    snprintf(cull, sizeof(cull), ", cull %s front 0x%x face 0x%x", glIsEnabled(GL_CULL_FACE) ? "on" : "off", front_face,
+             cull_face);
     GLint dfunc = 0;
     GLboolean dmask = 0;
     glGetIntegerv(GL_DEPTH_FUNC, &dfunc);
@@ -1841,8 +1872,8 @@ static void traced(const char *what, const char *desc) {
              dmask ? " write" : "");
     GLuint t = unit_tex[0];
     int ti = t < MAX_TEX_INFO;
-    l_info("[GL] draw %d: %s prog %u, %s%s%s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u%s", draw_no, what,
-           cur_program, desc, pos, depth, col, blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3], t,
+    l_info("[GL] draw %d: %s prog %u, %s%s%s%s%s, %s, blend %s 0x%x/0x%x 0x%x/0x%x, tex %u %dx%d fmt 0x%x, fb %u%s", draw_no, what,
+           cur_program, desc, pos, clip, cull, depth, col, blend_on ? "on" : "off", blend_f[0], blend_f[1], blend_f[2], blend_f[3], t,
            ti ? tex_info[t].w : 0, ti ? tex_info[t].h : 0, ti ? tex_info[t].fmt : 0, bound_draw_fb,
            color_mask_off ? ", color writes off" : "");
 }
