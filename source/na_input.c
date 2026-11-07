@@ -181,6 +181,18 @@ void na_input_draw_cursor(void) {
         na_gl_draw_cursor((int)cursor_x, (int)cursor_y);
 }
 
+/*
+ * The pop-up's X is tapped 3 times at most (8 frames down, 22 up), and not
+ * at all once the screen is touched or a button pressed: then the pop-up
+ * is the player's, with the cursor (Cross) or a finger, Accept included.
+ */
+static int gdpr_t = 0, gdpr_manual = 0;
+static int gdpr_auto(uint32_t b, int touched) {
+    if (touched || b) gdpr_manual = 1;
+    if (gdpr_manual || gdpr_t >= 3 * 30) return 0;
+    return 1;
+}
+
 static void poll_touch(void) {
     SceTouchData td;
     memset(&td, 0, sizeof(td));
@@ -204,7 +216,7 @@ static void poll_touch(void) {
             now[n_now].y = vpad[k].y;
             n_now++;
         }
-    } else if (na_hud_gdpr_up()) {
+    } else if (na_hud_gdpr_up() && gdpr_auto(b, td.reportNum > 0)) {
         /*
          * The privacy pop-up at the start: its X ("do not accept", the
          * privacy-friendly answer; there is no network anyway) is tapped,
@@ -212,7 +224,6 @@ static void poll_touch(void) {
          * GDPR Popup: 234.6x261.5 at the centre, X at (1,1)+(-20.8,-16.3),
          * 800x600 reference matched to width (x1.2).
          */
-        static int gdpr_t = 0;
         if (gdpr_t++ % 30 < 8 && n_now < MAX_POINTERS) {
             now[n_now].id = 201;
             now[n_now].x = SCREEN_W / 2 + (234.6f / 2 - 20.8f) * 1.2f;
