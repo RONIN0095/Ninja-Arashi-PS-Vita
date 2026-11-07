@@ -25,6 +25,7 @@
 
 #include <psp2/audioout.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/processmgr.h>
 
 #include "utils/logger.h"
@@ -180,7 +181,10 @@ static int32_t b_openStream(builder *b, stream **out) {
     sceAudioOutSetVolume(s->port, SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH, vol);
     s->state = ST_OPEN;
     if (s->cfg.data_cb) {
-        s->thread = sceKernelCreateThread("aaudio", audio_thread, 0x10000100 - 10, 0x10000, 0, 0, NULL);
+        // own core (the third): while a scene loads, the main thread and the
+        // loading jobs keep the other cores busy and the music stuttered
+        s->thread = sceKernelCreateThread("aaudio", audio_thread, 0x10000100 - 10, 0x10000, 0,
+                                          SCE_KERNEL_CPU_MASK_USER_2, NULL);
         stream *arg = s;
         sceKernelStartThread(s->thread, sizeof(arg), &arg);
     } else {

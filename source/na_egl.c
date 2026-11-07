@@ -248,6 +248,7 @@ EGLBoolean na_eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface, EGLint attrib
 
 void na_gl_screenshot(int n); // na_gles3.c
 #include "na_stats.h"
+#include "na_input.h"
 #include <psp2/kernel/processmgr.h>
 
 EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
@@ -264,6 +265,7 @@ EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         na_trace_swap = na_egl_swap_count + 1;
         l_info("[GL] tracing frame %d (L+R+DOWN)", na_trace_swap);
     }
+    na_input_draw_cursor();
     uint64_t t0 = sceKernelGetProcessTimeWide();
     vglSwapBuffers(GL_FALSE);
     na_stats.swap_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);

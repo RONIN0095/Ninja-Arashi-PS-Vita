@@ -2108,3 +2108,34 @@ void na_gles3_init(void) {
     extern GLboolean fast_texture_compression;
     fast_texture_compression = GL_TRUE;
 }
+
+/*
+ * Menu cursor: a small square drawn with scissored clears on the default
+ * framebuffer just before the swap (no shader, no Unity state touched
+ * except scissor, clear colour and colour mask, which are put back).
+ */
+void na_gl_draw_cursor(int x, int y) {
+    GLint box[4] = { 0, 0, 0, 0 };
+    GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(GL_SCISSOR_BOX, box);
+    GLboolean cm[4] = { 1, 1, 1, 1 };
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    if (bound_draw_fb != 0) glBindFramebuffer(0x8CA9, 0);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_SCISSOR_TEST);
+    int gy = 544 - y; // GL counts from the bottom
+    glScissor(x - 8, gy - 8, 16, 16);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(x - 6, gy - 6, 12, 12);
+    glClearColor(0.95f, 0.85f, 0.30f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(x - 2, gy - 2, 4, 4);
+    glClearColor(0.75f, 0.10f, 0.10f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+    glScissor(box[0], box[1], box[2], box[3]);
+    if (!sc) glDisable(GL_SCISSOR_TEST);
+    glColorMask(cm[0], cm[1], cm[2], cm[3]);
+    if (bound_draw_fb != 0) glBindFramebuffer(0x8CA9, bound_draw_fb);
+}

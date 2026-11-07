@@ -30,6 +30,7 @@
 #include "jni_objects.h"
 #include "na_android.h"
 #include "na_unity.h"
+#include "na_hud.h"
 #include "utils/logger.h"
 
 #define ACTION_DOWN 0
@@ -120,10 +121,13 @@ static const struct {
 
 volatile int na_trace_request = 0;
 
+static SceCtrlData last_pad;
+
 static uint32_t vpad_buttons(void) {
     SceCtrlData pad;
     memset(&pad, 0, sizeof(pad));
     if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0) return 0;
+    last_pad = pad;
     uint32_t b = pad.buttons;
     // L+R+DOWN: log every draw of the next frame and take a screenshot
     extern volatile int na_trace_request;
@@ -141,6 +145,42 @@ static uint32_t vpad_buttons(void) {
     return b;
 }
 
+/*
+ * Menus: a cursor moved with the D-pad or the left stick; Cross taps where
+ * it is (a finger held while Cross is held, so sliders and scroll lists
+ * work too). It shows while it is used and hides after 6 s, or when the
+ * screen is touched.
+ */
+static float cursor_x = SCREEN_W / 2, cursor_y = SCREEN_H / 2;
+static uint64_t cursor_until = 0;
+
+static void menu_cursor(uint32_t b, int touched) {
+    float dx = 0, dy = 0;
+    if (b & SCE_CTRL_LEFT) dx -= 7;
+    if (b & SCE_CTRL_RIGHT) dx += 7;
+    if (b & SCE_CTRL_UP) dy -= 7;
+    if (b & SCE_CTRL_DOWN) dy += 7;
+    int sx = (int)last_pad.lx - 128, sy = (int)last_pad.ly - 128;
+    if (sx > 24 || sx < -24) dx += sx / 10.0f;
+    if (sy > 24 || sy < -24) dy += sy / 10.0f;
+    uint64_t now = sceKernelGetProcessTimeWide();
+    if (dx || dy || (b & SCE_CTRL_CROSS)) cursor_until = now + 6000000;
+    if (touched) cursor_until = 0;
+    cursor_x += dx;
+    cursor_y += dy;
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_x > SCREEN_W - 1) cursor_x = SCREEN_W - 1;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_y > SCREEN_H - 1) cursor_y = SCREEN_H - 1;
+}
+
+// Called before each swap: draws the cursor while it is in use
+void na_input_draw_cursor(void) {
+    void na_gl_draw_cursor(int x, int y);
+    if (cursor_until && sceKernelGetProcessTimeWide() < cursor_until && !na_hud_in_level())
+        na_gl_draw_cursor((int)cursor_x, (int)cursor_y);
+}
+
 static void poll_touch(void) {
     SceTouchData td;
     memset(&td, 0, sizeof(td));
@@ -155,12 +195,23 @@ static void poll_touch(void) {
         n_now++;
     }
     uint32_t b = vpad_buttons();
-    for (int k = 0; k < N_VPAD && n_now < MAX_POINTERS; k++) {
-        if (!(b & vpad[k].buttons)) continue;
-        now[n_now].id = 128 + k; // real fingers are 0..127
-        now[n_now].x = vpad[k].x;
-        now[n_now].y = vpad[k].y;
-        n_now++;
+    if (na_hud_in_level()) {
+        cursor_until = 0;
+        for (int k = 0; k < N_VPAD && n_now < MAX_POINTERS; k++) {
+            if (!(b & vpad[k].buttons)) continue;
+            now[n_now].id = 128 + k; // real fingers are 0..127
+            now[n_now].x = vpad[k].x;
+            now[n_now].y = vpad[k].y;
+            n_now++;
+        }
+    } else {
+        menu_cursor(b, td.reportNum > 0);
+        if ((b & SCE_CTRL_CROSS) && n_now < MAX_POINTERS) {
+            now[n_now].id = 200; // the cursor's finger
+            now[n_now].x = cursor_x;
+            now[n_now].y = cursor_y;
+            n_now++;
+        }
     }
 
     // Lifted fingers: POINTER_UP (or UP for the last one), sent while the
@@ -248,6 +299,9 @@ static void poll_buttons(void) {
     for (unsigned i = 0; i < sizeof(keymap) / sizeof(keymap[0]); i++)
         if (changed & keymap[i].button)
             send_key((pad.buttons & keymap[i].button) ? 0 : 1, keymap[i].keycode);
+    // menus: Circle is Android's Back (Unity's Escape) as well
+    if ((changed & SCE_CTRL_CIRCLE) && !na_hud_in_level())
+        send_key((pad.buttons & SCE_CTRL_CIRCLE) ? 0 : 1, 4);
     prev_buttons = pad.buttons;
 }
 

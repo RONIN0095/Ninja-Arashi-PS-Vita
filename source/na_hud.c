@@ -34,6 +34,11 @@ static runtime_invoke_t invoke;
 static string_new_t string_new;
 static void *m_find, *m_set_active, *m_set_shadows, *m_set_shadow_distance;
 static int state = 0; // 0 not set up, 1 ready, -1 failed
+static volatile int in_level = 0; // the level's touch controls are up
+
+int na_hud_in_level(void) {
+    return in_level;
+}
 
 static const char *const parts[] = {
     "Canvas/PlayButton/Left/image",       "Canvas/PlayButton/Right/image",
@@ -104,6 +109,10 @@ void na_hud_tick(int frame) {
             a[0] = &zero;
             call(m_set_shadow_distance, NULL, a);
         }
+    }
+    {
+        void *a[1] = { string_new("Canvas/PlayButton") };
+        in_level = call(m_find, NULL, a) != NULL;
     }
     static int logged = 0;
     int hidden = 0;
