@@ -1518,9 +1518,14 @@ static void glBindAttribLocation_na(GLuint p, GLuint idx, const GLchar *name) {
 static GLint prog_o2w_loc[MAX_PROGS];
 static float prog_o2w[MAX_PROGS][16];
 
+// and the view-projection matrix, for the near plane check (cut_near_triangles)
+static GLint prog_vp_loc[MAX_PROGS];
+static float prog_vp[MAX_PROGS][16];
+
 static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
     GLint r = glGetUniformLocation(p, name);
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_ObjectToWorld") == 0) prog_o2w_loc[p] = r;
+    if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_MatrixVP") == 0) prog_vp_loc[p] = r;
     LOG_CALL("glGetUniformLocation(%u, %s) = %d", p, name, r);
     return r;
 }
@@ -1530,6 +1535,8 @@ static void glUniform4fv_na(GLint loc, GLsizei count, const GLfloat *v) {
              count > 1 ? " ..." : "");
     if (count == 4 && cur_program < MAX_PROGS && prog_o2w_loc[cur_program] == loc && loc)
         memcpy(prog_o2w[cur_program], v, sizeof(prog_o2w[0]));
+    if (count == 4 && cur_program < MAX_PROGS && prog_vp_loc[cur_program] == loc && loc)
+        memcpy(prog_vp[cur_program], v, sizeof(prog_vp[0]));
     glUniform4fv(loc, count, v);
 }
 
@@ -1839,6 +1846,105 @@ static void glDrawArraysInstanced_na(GLenum mode, GLint first, GLsizei count, GL
     if (t) traced_done();
 }
 
+/*
+ * Triangles in front of the camera's near plane. The game's camera has
+ * perspective (the backgrounds lie far behind), and some effects (the
+ * KriptoFX trails and glows near the player) put vertices at or behind the
+ * camera. A phone's GPU clips those triangles at the near plane; here they
+ * came out as huge stretched triangles over half the screen (streaks), and
+ * the one draw took 58 ms. Such triangles are dropped: for an indexed
+ * triangle draw whose program has the usual Unity matrices, each vertex's
+ * clip position is worked out on the CPU (ObjectToWorld, then MatrixVP), and
+ * triangles with a vertex in front of the near plane (z < -w) are left out
+ * of a copy of the index list that is drawn instead.
+ */
+static uint8_t *near_bad;   // per vertex: in front of the near plane
+static size_t near_bad_n;
+static void *near_idx;      // the filtered index list
+static size_t near_idx_size;
+static int near_logs = 0;
+
+static const void *cut_near_triangles(GLenum mode, GLsizei *count, GLenum type, const void *indices, GLint base) {
+    if (mode != GL_TRIANGLES || cur_program >= MAX_PROGS) return NULL;
+    if (!prog_vp_loc[cur_program] || !prog_o2w_loc[cur_program]) return NULL;
+    const float *vp = prog_vp[cur_program], *m = prog_o2w[cur_program];
+    // orthographic: w is 1 everywhere, nothing can be in front of the camera
+    if (vp[3] == 0 && vp[7] == 0 && vp[11] == 0) return NULL;
+    if (!(cur_vao->vertex_attrib_state & 1) || !cur_vao->vertex_attrib_vbo[0]) return NULL;
+    if (cur_vao->vertex_attrib_config[0].format != 9 /* F32 */ || cur_vao->vertex_attrib_config[0].componentCount < 3)
+        return NULL;
+    int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
+    vgl_vbo *ib = (vgl_vbo *)cur_vao->index_array_unit;
+    const uint8_t *src = ib ? (const uint8_t *)ib->ptr + (uintptr_t)indices : (const uint8_t *)indices;
+    if (!src) return NULL;
+    GLsizei n = *count;
+    uint32_t lo = 0xffffffff, hi = 0;
+    for (GLsizei i = 0; i < n; i++) {
+        uint32_t v = isz == 2 ? ((const uint16_t *)src)[i] : isz == 4 ? ((const uint32_t *)src)[i] : src[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+    }
+    if (hi - lo > 65535) return NULL;
+    vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
+    uint32_t off = cur_vao->vertex_attrib_offsets[0], stride = cur_vao->vertex_stream_config[0].stride;
+    if (!vb->ptr || off + (hi + base) * stride + 12 > (uint32_t)vb->size) return NULL;
+    size_t nv = hi - lo + 1;
+    if (nv > near_bad_n) {
+        uint8_t *nb = realloc(near_bad, nv);
+        if (!nb) return NULL;
+        near_bad = nb;
+        near_bad_n = nv;
+    }
+    int bad = 0;
+    for (size_t k = 0; k < nv; k++) {
+        const float *f = (const float *)((const uint8_t *)vb->ptr + off + (lo + k + base) * stride);
+        float wp[4];
+        for (int c = 0; c < 4; c++) wp[c] = m[c] * f[0] + m[4 + c] * f[1] + m[8 + c] * f[2] + m[12 + c];
+        float z = vp[2] * wp[0] + vp[6] * wp[1] + vp[10] * wp[2] + vp[14] * wp[3];
+        float w = vp[3] * wp[0] + vp[7] * wp[1] + vp[11] * wp[2] + vp[15] * wp[3];
+        near_bad[k] = !(z >= -w && w > 0); // NaN counts as bad too
+        bad += near_bad[k];
+    }
+    if (!bad) return NULL;
+    if ((size_t)n * isz > near_idx_size) {
+        void *ni = realloc(near_idx, (size_t)n * isz);
+        if (!ni) return NULL;
+        near_idx = ni;
+        near_idx_size = (size_t)n * isz;
+    }
+    GLsizei kept = 0;
+    for (GLsizei t = 0; t + 2 < n; t += 3) {
+        uint32_t a, b, c;
+        if (isz == 2) { const uint16_t *s16 = (const uint16_t *)src; a = s16[t]; b = s16[t + 1]; c = s16[t + 2]; }
+        else if (isz == 4) { const uint32_t *s32 = (const uint32_t *)src; a = s32[t]; b = s32[t + 1]; c = s32[t + 2]; }
+        else { a = src[t]; b = src[t + 1]; c = src[t + 2]; }
+        if (near_bad[a - lo] || near_bad[b - lo] || near_bad[c - lo]) continue;
+        if (isz == 2) { uint16_t *d = (uint16_t *)near_idx + kept; d[0] = a; d[1] = b; d[2] = c; }
+        else if (isz == 4) { uint32_t *d = (uint32_t *)near_idx + kept; d[0] = a; d[1] = b; d[2] = c; }
+        else { uint8_t *d = (uint8_t *)near_idx + kept; d[0] = a; d[1] = b; d[2] = c; }
+        kept += 3;
+    }
+    if (near_logs < 30) {
+        near_logs++;
+        l_info("[GL] draw %d (prog %u): %d of %u vertices in front of the near plane, %d of %d triangles drawn",
+               draw_no, cur_program, bad, (unsigned)nv, kept / 3, n / 3);
+    }
+    *count = kept;
+    return near_idx;
+}
+
+// Draws with the filtered index list (client memory; vitaGL copies it)
+static void draw_cut(GLenum mode, GLsizei count, GLenum type, const void *idx, GLint base) {
+    if (count <= 0) return;
+    uint32_t saved = cur_vao->index_array_unit;
+    cur_vao->index_array_unit = 0;
+    if (base == 0)
+        glDrawElements(mode, count, type, idx);
+    else
+        glDrawElementsBaseVertex(mode, count, type, idx, base);
+    cur_vao->index_array_unit = saved;
+}
+
 static void glDrawElements_na(GLenum mode, GLsizei count, GLenum type, const void *indices) {
     char desc[96];
     draw_no++;
@@ -1846,7 +1952,10 @@ static void glDrawElements_na(GLenum mode, GLsizei count, GLenum type, const voi
     int t = trace_this_draw();
     if (t) traced("DrawElements", desc);
     masked_draw_begin();
-    glDrawElements(mode, count, type, indices);
+    GLsizei n = count;
+    const void *cut = cut_near_triangles(mode, &n, type, indices, 0);
+    if (cut) draw_cut(mode, n, type, cut, 0);
+    else glDrawElements(mode, count, type, indices);
     masked_draw_end();
     if (t) traced_done();
 }
@@ -1858,7 +1967,10 @@ static void glDrawElementsBaseVertex_na(GLenum mode, GLsizei count, GLenum type,
     int t = trace_this_draw();
     if (t) traced("DrawElementsBaseVertex", desc);
     masked_draw_begin();
-    if (base == 0)
+    GLsizei n = count;
+    const void *cut = cut_near_triangles(mode, &n, type, indices, base);
+    if (cut) draw_cut(mode, n, type, cut, base);
+    else if (base == 0)
         glDrawElements(mode, count, type, indices);
     else
         glDrawElementsBaseVertex(mode, count, type, indices, base);
