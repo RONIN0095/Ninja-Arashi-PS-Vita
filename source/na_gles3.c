@@ -1345,6 +1345,36 @@ static void glDisable_na(GLenum cap) {
     glDisable(cap);
 }
 
+/*
+ * Culling of front faces. vitaGL only knows back face culling: with
+ * glCullFace(GL_FRONT) it set "no polygons" and dropped every draw. Unity
+ * culls front faces for some meshes (mirrored ones, and Cull Front
+ * shaders): the black blocks under the ground were not drawn, and what the
+ * frame before left there smeared into streaks as the camera moved.
+ * Culling the front faces is culling the back faces with the other winding
+ * as the front, which vitaGL is given instead.
+ */
+static GLenum front_face = GL_CCW, cull_face = GL_BACK;
+static void apply_cull(void) {
+    if (cull_face == GL_FRONT) {
+        glFrontFace(front_face == GL_CCW ? GL_CW : GL_CCW);
+        glCullFace(GL_BACK);
+    } else {
+        glFrontFace(front_face);
+        glCullFace(cull_face);
+    }
+}
+static void glCullFace_na(GLenum mode) {
+    static int logged = 0;
+    if (mode != GL_BACK && logged++ < 8) l_info("[GL] glCullFace(0x%x)", mode);
+    cull_face = mode;
+    apply_cull();
+}
+static void glFrontFace_na(GLenum mode) {
+    front_face = mode;
+    apply_cull();
+}
+
 static void glEnable_na(GLenum cap) {
     if (cap == GL_BLEND) blend_on = 1;
     glEnable(cap);
@@ -2109,7 +2139,7 @@ static const gl_entry gl_table[] = {
     E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
     E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
     { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
-    E(glEnable), E(glDisable), E(glColorMask), E(glActiveTexture), E(glBindTexture), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
+    E(glCullFace), E(glFrontFace), E(glEnable), E(glDisable), E(glColorMask), E(glActiveTexture), E(glBindTexture), E(glBlendFunc), E(glBlendFuncSeparate), E(glColorMaski), E(glBlendEquationi), E(glBlendEquationSeparatei),
     E(glBlendFuncSeparatei),
     E(glVertexAttribIPointer), E(glUniform1uiv), E(glUniform2uiv), E(glUniform3uiv), E(glUniform4uiv),
     E(glGetUniformiv), E(glDrawElementsInstancedBaseVertex),
