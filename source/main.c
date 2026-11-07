@@ -35,6 +35,7 @@
 #include "na_looper.h"
 #include "na_threads.h"
 #include "na_hud.h"
+#include "na_dxtpatch.h"
 #include "na_stats.h"
 volatile na_frame_stats na_stats;
 
@@ -149,6 +150,8 @@ int main() {
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     vglSwapBuffers(GL_FALSE);
+
+    na_dxt_patch(); // once: the ETC2 textures in the asset files become DXT5
 
     SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100 + 10, 0x4000, 0, 0, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);

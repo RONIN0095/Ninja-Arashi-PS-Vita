@@ -15,6 +15,7 @@
  */
 
 #include "na_apk.h"
+#include "na_dxtpatch.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -266,10 +267,12 @@ static int extract(apk_entry *e, const char *out_path) {
     uint8_t *ibuf = malloc(CHUNK), *obuf = malloc(CHUNK);
     uint32_t left = e->comp_size;
     int ok = 1;
+    uLong crc = crc32(0L, Z_NULL, 0);
     if (e->method == 0) {
         while (left && ok) {
             size_t n = left < CHUNK ? left : CHUNK;
             if (fread(ibuf, 1, n, in) != n || fwrite(ibuf, 1, n, out) != n) ok = 0;
+            crc = crc32(crc, ibuf, n);
             left -= n;
         }
     } else if (e->method == 8) {
@@ -291,6 +294,7 @@ static int extract(apk_entry *e, const char *out_path) {
             if (r != Z_OK && r != Z_STREAM_END) { ok = 0; break; }
             size_t have = CHUNK - zs.avail_out;
             if (fwrite(obuf, 1, have, out) != have) ok = 0;
+            crc = crc32(crc, obuf, have);
             if (r != Z_STREAM_END && zs.avail_in == 0 && left == 0 && have == 0) { ok = 0; break; }
         }
         inflateEnd(&zs);
@@ -301,12 +305,27 @@ static int extract(apk_entry *e, const char *out_path) {
     free(obuf);
     fclose(in);
     fclose(out);
+    if (ok && (uint32_t)crc != e->crc) {
+        l_warn("[apk] %s: extracted CRC %08x, APK has %08x", e->name, (unsigned)crc, (unsigned)e->crc);
+        ok = 0;
+    }
     if (!ok) {
         remove(tmp_path);
         return -1;
     }
     remove(out_path);
     rename(tmp_path, out_path);
+    // A fresh copy is known good: no CRC check of it on later starts (it may
+    // be changed: see na_dxtpatch.c, which patches the new copy next start)
+    if (strncmp(e->name, "assets/", 7) == 0) {
+        FILE *okf = fopen(CRC_OK_PATH, "a");
+        if (okf) {
+            fprintf(okf, "%s\n", e->name);
+            fclose(okf);
+        }
+        e->verified = 1;
+        na_dxt_patch_invalidate();
+    }
     return 0;
 }
 

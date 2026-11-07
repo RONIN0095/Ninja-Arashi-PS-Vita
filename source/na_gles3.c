@@ -819,6 +819,8 @@ static int etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) {
     return 1;
 }
 
+int na_etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) { return etc2_to_dxt5(etc, dxt, w, h); }
+
 static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, const void *data, GLsizei size) {
     if (target != GL_TEXTURE_2D || fmt != 0x9278 || !data) return 0;
     if (w < 64 || h < 64 || w > 2048 || h > 2048 || (w & (w - 1)) || (h & (h - 1))) return 0;
