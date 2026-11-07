@@ -435,6 +435,41 @@ static void glDeleteBuffers_na(GLsizei n, const GLuint *ids) {
         vertex_array_unit = saved_; \
     } while (0)
 
+
+/*
+ * Buffers Unity maps (its dynamic vertex/index rings for particles, trails,
+ * text popups) are written by worker threads while mapped. vitaGL's
+ * glBufferSubData copies a buffer that was drawn from recently into new
+ * storage; on a mapped buffer the copy is taken while those writes are still
+ * going on and the draws read half-written vertices: huge triangles and
+ * streaks across the level. Sub-data on a buffer that has been mapped is
+ * written in place instead (the fences keep the GPU's reads safe).
+ */
+#define MAX_MAPPED_BUFS 64
+static void *mapped_bufs[MAX_MAPPED_BUFS];
+static int n_mapped_bufs = 0;
+
+static void note_mapped(void *b) {
+    if (!b) return;
+    for (int i = 0; i < n_mapped_bufs; i++)
+        if (mapped_bufs[i] == b) return;
+    if (n_mapped_bufs < MAX_MAPPED_BUFS) mapped_bufs[n_mapped_bufs++] = b;
+}
+
+static int was_mapped(void *b) {
+    for (int i = 0; i < n_mapped_bufs; i++)
+        if (mapped_bufs[i] == b) return 1;
+    return 0;
+}
+
+static void *element_buffer(void);
+static void *target_buffer(GLenum target) {
+    if (target == GL_ARRAY_BUFFER) return (void *)vertex_array_unit;
+    if (target == GL_ELEMENT_ARRAY_BUFFER) return element_buffer();
+    int i = extra_index(target);
+    return i >= 0 ? (void *)extra_bound[i] : NULL;
+}
+
 static void glBufferData_na(GLenum target, GLsizei size, const void *data, GLenum usage) {
     if (TRACING_FRAME()) l_info("[GL] BufferData(0x%x, %d, %p, 0x%x)", target, size, data, usage);
     if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferData size %d data %p usage 0x%x", extra_bound[PIXEL_UNPACK_IDX], size, data, usage); }
@@ -446,6 +481,11 @@ static void glBufferData_na(GLenum target, GLsizei size, const void *data, GLenu
 static void glBufferSubData_na(GLenum target, GLintptr off, GLsizeiptr size, const void *data) {
     if (TRACING_FRAME()) l_info("[GL] BufferSubData(0x%x, +%d, %d)", target, (int)off, (int)size);
     if (target == 0x88EC && upload_logs < 200) { upload_logs++; l_info("[UP] PBO %u: " "BufferSubData off %d size %d data %p", extra_bound[PIXEL_UNPACK_IDX], (int)off, (int)size, data); }
+    vgl_vbo *b = (vgl_vbo *)target_buffer(target);
+    if (b && b->ptr && was_mapped(b) && off >= 0 && off + size <= b->size && data) {
+        memcpy((uint8_t *)b->ptr + off, data, size);
+        return;
+    }
 #define OP(t) glBufferSubData(t, off, size, data)
     WITH_TARGET(target, OP);
 #undef OP
@@ -455,6 +495,7 @@ static void *element_buffer(void); // the bound index buffer (needs vitaGL's VAO
 
 static void *glMapBufferRange_na(GLenum target, GLintptr off, GLsizeiptr len, GLbitfield access) {
     if (TRACING_FRAME()) l_info("[GL] MapBufferRange(0x%x, +%d, %d, access 0x%x)", target, (int)off, (int)len, access);
+    note_mapped(target_buffer(target));
     void *r = NULL;
     // MAP_INVALIDATE_BUFFER: the old contents may go; vitaGL would hand out
     // the memory the GPU is still drawing from, so give the buffer new
@@ -771,13 +812,40 @@ static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, c
     if (w < 64 || h < 64 || w > 2048 || h > 2048 || (w & (w - 1)) || (h & (h - 1))) return 0;
     if (size < w * h) return 0;
     uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, w * h);
-    char path[128];
+    char path[128], zpath[132];
     snprintf(path, sizeof(path), DATA_PATH "texcache/%08x_%dx%d.dxt5", (unsigned)crc, w, h);
+    snprintf(zpath, sizeof(zpath), "%sz", path);
     size_t dsize = (size_t)w * h; // DXT5: one byte per pixel
     uint8_t *dxt = malloc(dsize);
     if (!dxt) return 0;
     static int hits = 0, misses = 0;
-    FILE *f = fopen(path, "rb");
+    /*
+     * Cache files are zlib-compressed (.dxt5z): DXT5 data of these textures
+     * shrinks to about 13% (large transparent areas), and the memory card
+     * reads only about 10 MB/s, so reading 4 MB per 2048x2048 texture was
+     * most of a level's loading time. Plain .dxt5 files are still read.
+     */
+    FILE *f = fopen(zpath, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long zn = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        uint8_t *z = zn > 0 ? malloc(zn) : NULL;
+        int ok = 0;
+        if (z && fread(z, 1, zn, f) == (size_t)zn) {
+            uLongf out = dsize;
+            ok = uncompress(dxt, &out, z, zn) == Z_OK && out == dsize;
+        }
+        free(z);
+        fclose(f);
+        if (ok) {
+            glCompressedTexImage2D(target, 0, 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)dsize, dxt);
+            free(dxt);
+            if (hits++ < 8) l_info("[texcache] hit %s", zpath);
+            return 1;
+        }
+    }
+    f = fopen(path, "rb");
     if (f) {
         size_t got = fread(dxt, 1, dsize, f);
         fclose(f);
@@ -794,12 +862,14 @@ static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, c
     }
     glCompressedTexImage2D(target, 0, 0x83F3, w, h, 0, (GLsizei)dsize, dxt);
     mkdir(DATA_PATH "texcache", 0777);
-    f = fopen(path, "wb");
-    if (f) {
-        fwrite(dxt, 1, dsize, f);
+    uLongf zn = compressBound(dsize);
+    uint8_t *z = malloc(zn);
+    if (z && compress2(z, &zn, dxt, dsize, 1) == Z_OK && (f = fopen(zpath, "wb"))) {
+        fwrite(z, 1, zn, f);
         fclose(f);
     }
-    if (misses++ < 8) l_info("[texcache] stored %s", path);
+    free(z);
+    if (misses++ < 8) l_info("[texcache] stored %s", zpath);
     free(dxt);
     return 1;
 }
@@ -1573,6 +1643,7 @@ static uint32_t max_index(const void *p, GLsizei count, GLenum type) {
 
 // Returns 1 if the draw stays inside its buffers; desc gets a short description.
 static float pos_lo[3], pos_hi[3]; // vertex position range of the last checked draw
+static void ring_record(int count, uint32_t last);
 
 static int check_draw(GLsizei count, GLenum type, const void *indices, GLint base, GLint first, int elements,
                       char *desc, size_t desc_size) {
@@ -1666,6 +1737,7 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
             return 0;
         }
     }
+    ring_record(count, last);
     return 1;
 }
 
@@ -2138,4 +2210,54 @@ void na_gl_draw_cursor(int x, int y) {
     if (!sc) glDisable(GL_SCISSOR_TEST);
     glColorMask(cm[0], cm[1], cm[2], cm[3]);
     if (bound_draw_fb != 0) glBindFramebuffer(0x8CA9, bound_draw_fb);
+}
+
+/*
+ * Recent draws: the last RING_DRAWS draws are kept (cheaply) all the time;
+ * L+R+DOWN writes them to the log, so a glitch seen a second or two before
+ * the buttons are pressed is in it.
+ */
+#define RING_DRAWS 12000
+typedef struct {
+    int swap, draw;
+    uint16_t prog, tex;
+    int count, last;
+    float lo[2], hi[2];
+    float sx, sy, mx, my;
+} ring_draw;
+static ring_draw *ring;
+static int ring_pos = 0, ring_n = 0;
+
+static void ring_record(int count, uint32_t last) {
+    if (!ring) {
+        ring = calloc(RING_DRAWS, sizeof(ring_draw));
+        if (!ring) return;
+    }
+    ring_draw *r = &ring[ring_pos];
+    r->swap = na_egl_swap_count;
+    r->draw = draw_no;
+    r->prog = (uint16_t)cur_program;
+    r->tex = (uint16_t)unit_tex[0];
+    r->count = count;
+    r->last = (int)last;
+    r->lo[0] = pos_lo[0]; r->lo[1] = pos_lo[1];
+    r->hi[0] = pos_hi[0]; r->hi[1] = pos_hi[1];
+    const float *m = cur_program < MAX_PROGS ? prog_o2w[cur_program] : NULL;
+    r->sx = m ? m[0] : 0; r->sy = m ? m[5] : 0; r->mx = m ? m[12] : 0; r->my = m ? m[13] : 0;
+    ring_pos = (ring_pos + 1) % RING_DRAWS;
+    if (ring_n < RING_DRAWS) ring_n++;
+}
+
+void na_gl_dump_recent_draws(void) {
+    if (!ring) return;
+    l_info("[RING] last %d draws (frame, draw, program, texture, indices, last vertex, x range, y range, o2w scale/move):", ring_n);
+    int start = (ring_pos - ring_n + RING_DRAWS) % RING_DRAWS;
+    for (int i = 0; i < ring_n; i++) {
+        ring_draw *r = &ring[(start + i) % RING_DRAWS];
+        GLuint t = r->tex;
+        l_info("[RING] f%d d%d p%u t%u(%dx%d) n%d v%d x %.1f..%.1f y %.1f..%.1f s %.2f/%.2f m %.1f/%.1f", r->swap, r->draw,
+               r->prog, t, t < MAX_TEX_INFO ? tex_info[t].w : 0, t < MAX_TEX_INFO ? tex_info[t].h : 0, r->count, r->last,
+               r->lo[0], r->hi[0], r->lo[1], r->hi[1], r->sx, r->sy, r->mx, r->my);
+    }
+    ring_n = 0;
 }

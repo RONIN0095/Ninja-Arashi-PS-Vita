@@ -4,7 +4,8 @@ Builds the loader's texture cache on a PC from your own APK, so the Vita
 never has to convert a texture (first start loads like later ones).
 
 The loader converts ETC2 textures to DXT5 and keeps the result in
-ux0:data/ninjaarashi/texcache/<crc32 of the ETC2 data>_<w>x<h>.dxt5. This
+ux0:data/ninjaarashi/texcache/<crc32 of the ETC2 data>_<w>x<h>.dxt5z
+(zlib-compressed DXT5). This
 script does the same conversion with vitaGL's ETC2 decoder and stb_dxt.
 
 Needs: Python 3 with UnityPy (pip install UnityPy), a C compiler.
@@ -104,14 +105,17 @@ def main():
                 etc = bytes(b)
             if len(etc) < w * h:
                 continue
-            name = "%08x_%dx%d.dxt5" % (zlib.crc32(etc[: w * h]) & 0xFFFFFFFF, w, h)
+            name = "%08x_%dx%d.dxt5z" % (zlib.crc32(etc[: w * h]) & 0xFFFFFFFF, w, h)
             dst = os.path.join(cache, name)
             if os.path.exists(dst):
                 continue
             src = os.path.join(tmp, "in.etc")
             with open(src, "wb") as f:
                 f.write(etc[: w * h])
-            subprocess.run([conv, src, str(w), str(h), dst], check=True)
+            raw = os.path.join(tmp, "out.dxt5")
+            subprocess.run([conv, src, str(w), str(h), raw], check=True)
+            with open(raw, "rb") as f, open(dst, "wb") as g:  # zlib: the loader reads .dxt5z
+                g.write(zlib.compress(f.read(), 9))
             done += 1
         print("%d textures written to %s" % (done, cache))
 

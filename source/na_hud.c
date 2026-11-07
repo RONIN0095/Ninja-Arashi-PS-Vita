@@ -47,6 +47,9 @@ static const char *const parts[] = {
     "Canvas/PlayButton/Trans/Image",
     // main menu: the "Remove Ads" purchase button (no store on the Vita)
     "CanvasMain/LevelChoiseCanVas/Remove Ads",
+    // the "rate us" pop-up and its button in the settings (no store)
+    "CanvasMain/RateUs",
+    "CanvasMain/Setting/main/Rateus",
 };
 
 static void *sym(const char *name) {
@@ -92,12 +95,12 @@ static void *call(void *method, void *obj, void **params) {
 }
 
 void na_hud_tick(int frame) {
-    if (state < 0 || frame < 30 || frame % 3 != 0) return; // every 3 frames: hidden before they show
+    if (state < 0 || frame < 30) return; // every frame: gone before they show
     if (state == 0) {
         state = setup();
         if (state < 0) return;
     }
-    if (frame % 300 == 0) { // shadows off (again after scene loads)
+    if (frame % 300 == 30) { // shadows off (again after scene loads)
         int none = 0;
         float zero = 0.0f;
         void *a[1];

@@ -262,6 +262,8 @@ EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         na_trace_swap = -1;
     } else if (na_trace_request && na_trace_swap < 0) {
         na_trace_request = 0;
+        void na_gl_dump_recent_draws(void);
+        na_gl_dump_recent_draws();
         na_trace_swap = na_egl_swap_count + 1;
         l_info("[GL] tracing frame %d (L+R+DOWN)", na_trace_swap);
     }
