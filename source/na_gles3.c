@@ -2092,18 +2092,12 @@ static int fence_wait(na_fence *f) {
     if (!f || f->done) return 1;
     if (f->swap < na_egl_swap_count) {
         uint64_t t0 = sceKernelGetProcessTimeWide();
-        // The GPU's work of the frames before. Not vitaGL's glFinish, if it
-        // can be helped: that ends the scene being drawn and goes on in a
+        // The GPU's work of the frames before. Not vitaGL's glFinish:
+        // that ends the scene being drawn and goes on in a
         // new one (a second pass over the screen each frame, and without
         // STORE_DEPTH_STENCIL an empty depth buffer for the rest of the
         // frame: what the black blocks under the hills hide showed again).
-        int r = sceGxmFinish(gxm_context);
-        static int logged = 0;
-        if (logged < 3) {
-            logged++;
-            l_info("[GL] fence: sceGxmFinish in a scene = 0x%x", r);
-        }
-        if (r < 0) glFinish();
+        sceGxmFinish(gxm_context);
         na_stats.finish_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
         f->done = 1;
         fence_waits++;
