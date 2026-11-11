@@ -1823,14 +1823,15 @@ static void traced(const char *what, const char *desc) {
         }
     }
     // first vertex position (attribute 0, floats) and depth state
-    char pos[200] = "";
+    char pos[224] = "";
     if (cur_vao->vertex_attrib_state & 1) {
         vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
         uint32_t off = cur_vao->vertex_attrib_offsets[0] + first_vertex * cur_vao->vertex_stream_config[0].stride;
         if (vb && vb->ptr && off + 12 <= (uint32_t)vb->size) {
             const float *f = (const float *)((const uint8_t *)vb->ptr + off);
             const float *m = cur_program < MAX_PROGS ? prog_o2w[cur_program] : NULL;
-            snprintf(pos, sizeof(pos), ", pos %.2f/%.2f/%.2f (x %.1f..%.1f, y %.1f..%.1f; o2w scale %.2f/%.2f move %.1f/%.1f/%.1f)",
+            snprintf(pos, sizeof(pos), ", at +%u, pos %.2f/%.2f/%.2f (x %.1f..%.1f, y %.1f..%.1f; o2w scale %.2f/%.2f move %.1f/%.1f/%.1f)",
+                     (unsigned)cur_vao->vertex_attrib_offsets[0],
                      f[0], f[1], f[2], pos_lo[0], pos_hi[0], pos_lo[1], pos_hi[1], m ? m[0] : 0, m ? m[5] : 0,
                      m ? m[12] : 0, m ? m[13] : 0, m ? m[14] : 0);
         }
@@ -1880,8 +1881,9 @@ static void traced(const char *what, const char *desc) {
            color_mask_off ? ", color writes off" : "");
 }
 
+// No glFinish here: vitaGL's ends the scene, and the next one starts with an
+// empty depth buffer, so a traced frame did not look like the frame played.
 static void traced_done(void) {
-    glFinish();
     l_info("[GL] draw %d ok", draw_no);
 }
 
@@ -2074,6 +2076,7 @@ static void glDrawElementsInstancedBaseVertex_na(GLenum mode, GLsizei count, GLe
  * work done); one from the current frame has nothing submitted yet that
  * Unity could be overwriting from an earlier frame, and counts as signaled.
  */
+extern SceGxmContext *gxm_context; // vitaGL gxm.c
 typedef struct { int swap; int done; } na_fence;
 static int fence_waits = 0;
 
@@ -2089,7 +2092,18 @@ static int fence_wait(na_fence *f) {
     if (!f || f->done) return 1;
     if (f->swap < na_egl_swap_count) {
         uint64_t t0 = sceKernelGetProcessTimeWide();
-        glFinish();
+        // The GPU's work of the frames before. Not vitaGL's glFinish, if it
+        // can be helped: that ends the scene being drawn and goes on in a
+        // new one (a second pass over the screen each frame, and without
+        // STORE_DEPTH_STENCIL an empty depth buffer for the rest of the
+        // frame: what the black blocks under the hills hide showed again).
+        int r = sceGxmFinish(gxm_context);
+        static int logged = 0;
+        if (logged < 3) {
+            logged++;
+            l_info("[GL] fence: sceGxmFinish in a scene = 0x%x", r);
+        }
+        if (r < 0) glFinish();
         na_stats.finish_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
         f->done = 1;
         fence_waits++;
