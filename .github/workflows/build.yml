@@ -30,8 +30,22 @@ jobs:
         with:
           submodules: recursive
 
+      # The runner image has these tools; apt is only asked for what is
+      # missing, and tried again when the package mirror does not answer.
       - name: Install host dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake make python3 curl bzip2 xz-utils patch git
+        run: |
+          missing=""
+          for t in cmake make python3 curl bzip2 xz patch git; do
+            command -v "$t" >/dev/null || missing="$missing $t"
+          done
+          missing="${missing// xz/ xz-utils}"
+          if [ -n "$missing" ]; then
+            for try in 1 2 3 4; do
+              sudo apt-get update && sudo apt-get install -y $missing && break
+              [ "$try" = 4 ] && exit 1
+              sleep 30
+            done
+          fi
 
       - name: Install VitaSDK-softfp
         run: |
