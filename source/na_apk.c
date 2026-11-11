@@ -17,6 +17,8 @@
 #include "na_apk.h"
 #include "na_dxtpatch.h"
 
+void na_io_cache_drop(void); // na_dynlib.c
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -315,6 +317,7 @@ static int extract(apk_entry *e, const char *out_path) {
     }
     remove(out_path);
     rename(tmp_path, out_path);
+    na_io_cache_drop(); // copies of asset files kept in memory (na_dynlib.c)
     // A fresh copy is known good: no CRC check of it on later starts (it may
     // be changed: see na_dxtpatch.c, which patches the new copy next start)
     if (strncmp(e->name, "assets/", 7) == 0) {
@@ -397,28 +400,13 @@ const char *na_apk_map_path(const char *path, char *buf, size_t buflen) {
         struct stat st;
         char split[520];
         snprintf(split, sizeof(split), "%s.split0", entry);
-        if (!e && find(split) && stat(buf, &st) != 0) {
-            // Big files are stored as name.split0, .split1, ...: join them
-            l_info("[apk] joining %s.split*", entry);
-            char part_out[520];
-            snprintf(part_out, sizeof(part_out), "%s.joinpart", buf);
-            FILE *out = NULL;
-            for (int i = 0;; i++) {
-                snprintf(split, sizeof(split), "%s.split%d", entry, i);
-                apk_entry *pe = find(split);
-                if (!pe) break;
-                if (extract(pe, part_out) < 0) break;
-                FILE *pf = fopen(part_out, "rb");
-                if (!out) out = fopen(buf, "wb");
-                if (pf && out) {
-                    static uint8_t cbuf[64 * 1024];
-                    size_t n;
-                    while ((n = fread(cbuf, 1, sizeof(cbuf), pf)) > 0) fwrite(cbuf, 1, n, out);
-                }
-                if (pf) fclose(pf);
-                remove(part_out);
-            }
-            if (out) fclose(out);
+        // Big files are stored as name.split0, .split1, ...: Unity looks for
+        // the whole file first and then reads the parts itself. (The parts
+        // used to be joined into the whole file here as well: seconds of
+        // copying on the first visit of a level, for a file nobody read.)
+        if (!e && find(split)) {
+            sceKernelUnlockLwMutex(&map_lock, 1);
+            return buf;
         }
         if (e) {
             if (stat(buf, &st) != 0 || (uint32_t)st.st_size != e->size) {

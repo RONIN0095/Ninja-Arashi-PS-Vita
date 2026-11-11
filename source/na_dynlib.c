@@ -377,7 +377,147 @@ static int truncate_na(const char *path, long len) {
  */
 static int io_trace_left = 300;
 
+/*
+ * Asset files in memory. Loading a level reads 50-65 MB of asset files, at
+ * the memory card's 10 MB/s: 5-6 s, and most of it is the same files each
+ * time (the shared sprite atlases). Asset files of up to 1 MB (the APK's
+ * split parts and the small files) are kept whole in memory after their
+ * first read, up to CACHE_BUDGET, the least recently used going first, and
+ * later reads are copies. The heap has about 100 MB the game never uses;
+ * the cache stays away from the last CACHE_HEADROOM of it (checked when a
+ * file is added and from the main loop, see na_io_cache_trim).
+ */
+#define CACHE_MAX_FILE (1024 * 1024)
+#define CACHE_BUDGET (56u * 1024 * 1024)
+#define CACHE_HEADROOM (44u * 1024 * 1024)
+#define CACHE_FILES 256
+typedef struct {
+    char *name;
+    uint8_t *data;
+    uint32_t size, stamp;
+} cached_file;
+static cached_file cache_files[CACHE_FILES];
+static uint32_t cache_total = 0, cache_clock = 0, cache_hits_kb = 0;
+static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+extern int _newlib_heap_size_user; // main.c
+
+static uint32_t heap_free_now(void) {
+    struct mallinfo mi = mallinfo();
+    return (uint32_t)_newlib_heap_size_user - (uint32_t)mi.arena + (uint32_t)mi.fordblks;
+}
+
+static int cache_evict_one(void) {
+    int old = -1;
+    for (int i = 0; i < CACHE_FILES; i++)
+        if (cache_files[i].data && (old < 0 || cache_files[i].stamp < cache_files[old].stamp)) old = i;
+    if (old < 0) return 0;
+    cache_total -= cache_files[old].size;
+    free(cache_files[old].data);
+    free(cache_files[old].name);
+    memset(&cache_files[old], 0, sizeof(cache_files[old]));
+    return 1;
+}
+
+// Main loop, now and then: gives memory back when the game's heap gets tight
+void na_io_cache_trim(void) {
+    pthread_mutex_lock(&cache_lock);
+    int n = 0;
+    while (cache_total && heap_free_now() < CACHE_HEADROOM && cache_evict_one()) n++;
+    pthread_mutex_unlock(&cache_lock);
+    if (n) l_info("[cache] heap tight: %d asset files dropped, %u KB kept", n, (unsigned)(cache_total / 1024));
+}
+
+// An asset file was written again (na_apk.c): forget all copies
+void na_io_cache_drop(void) {
+    pthread_mutex_lock(&cache_lock);
+    while (cache_evict_one()) {}
+    pthread_mutex_unlock(&cache_lock);
+}
+
+uint32_t na_io_cache_kb(uint32_t *hits_kb) {
+    if (hits_kb) *hits_kb = cache_hits_kb;
+    return cache_total / 1024;
+}
+
+// Returns 1 and the result in *out when the read was served from memory
+static int cached_read(int fd, void *buf, size_t n, long *out) {
+    const char *name = na_io_fd_name(fd);
+    if (!name || strstr(name, "base.apk")) return 0;
+    int served = 0;
+    pthread_mutex_lock(&cache_lock);
+    cached_file *c = NULL;
+    for (int i = 0; i < CACHE_FILES; i++)
+        if (cache_files[i].data && strcmp(cache_files[i].name, name) == 0) {
+            c = &cache_files[i];
+            break;
+        }
+    long pos = (long)lseek(fd, 0, SEEK_CUR);
+    if (!c && pos >= 0) {
+        long size = (long)lseek(fd, 0, SEEK_END);
+        if (size > 0 && size <= CACHE_MAX_FILE) {
+            while (cache_total + size > CACHE_BUDGET && cache_evict_one()) {}
+            while (cache_total && heap_free_now() < CACHE_HEADROOM + (uint32_t)size && cache_evict_one()) {}
+            int slot = -1;
+            for (int i = 0; i < CACHE_FILES; i++)
+                if (!cache_files[i].data) {
+                    slot = i;
+                    break;
+                }
+            if (slot < 0 && cache_evict_one())
+                for (int i = 0; i < CACHE_FILES; i++)
+                    if (!cache_files[i].data) {
+                        slot = i;
+                        break;
+                    }
+            uint8_t *d = (slot >= 0 && heap_free_now() >= CACHE_HEADROOM + (uint32_t)size) ? malloc(size) : NULL;
+            if (d) {
+                uint64_t t0 = sceKernelGetProcessTimeWide();
+                long got = 0;
+                lseek(fd, 0, SEEK_SET);
+                while (got < size) {
+                    long r = read(fd, d + got, size - got);
+                    if (r <= 0) break;
+                    got += r;
+                }
+                na_stats.read_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+                na_stats.read_kb += (uint32_t)(got / 1024);
+                if (got == size) {
+                    c = &cache_files[slot];
+                    c->name = strdup(name);
+                    c->data = d;
+                    c->size = (uint32_t)size;
+                    cache_total += c->size;
+                    if (!c->name) {
+                        cache_total -= c->size;
+                        memset(c, 0, sizeof(*c));
+                        free(d);
+                        c = NULL;
+                    }
+                } else {
+                    free(d);
+                }
+            }
+        }
+        lseek(fd, pos, SEEK_SET);
+    }
+    if (c && pos >= 0) {
+        c->stamp = ++cache_clock;
+        size_t left = (uint32_t)pos < c->size ? c->size - (uint32_t)pos : 0;
+        size_t k = n < left ? n : left;
+        memcpy(buf, c->data + pos, k);
+        // like a read: the position moves on (to the end after a short read)
+        lseek(fd, k < n ? (long)c->size : pos + (long)k, SEEK_SET);
+        cache_hits_kb += (uint32_t)(k / 1024);
+        *out = (long)k;
+        served = 1;
+    }
+    pthread_mutex_unlock(&cache_lock);
+    return served;
+}
+
 static long read_na(int fd, void *buf, size_t n) {
+    long cr;
+    if (na_io_trace_left <= 0 && cached_read(fd, buf, n, &cr)) return cr;
     long pos = na_io_fd_name(fd) ? (long)lseek(fd, 0, SEEK_CUR) : -1;
     uint64_t t0 = sceKernelGetProcessTimeWide();
     long r = read(fd, buf, n);

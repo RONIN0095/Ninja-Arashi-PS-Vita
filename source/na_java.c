@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <strings.h>
 #include <sys/stat.h>
 
@@ -98,15 +99,77 @@ static void prefs_load(void) {
     l_info("[prefs] %d values loaded", n_prefs);
 }
 
+/*
+ * Saving: the file is written by a thread of its own. The game saves at each
+ * checkpoint (and for coins, kills, ...), and writing the file on the memory
+ * card held the main thread for 0.2-0.4 s: the short freeze there. The text
+ * is put together here and handed over; the thread writes the newest one.
+ */
+static pthread_mutex_t save_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t save_cond = PTHREAD_COND_INITIALIZER;
+static char *save_text = NULL; // waiting to be written
+static int save_thread_up = 0;
+
+static void *prefs_writer(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&save_lock);
+        while (!save_text) pthread_cond_wait(&save_cond, &save_lock);
+        char *text = save_text;
+        save_text = NULL;
+        pthread_mutex_unlock(&save_lock);
+        FILE *f = fopen(PREFS_FILE ".tmp", "w");
+        if (f) {
+            size_t n = strlen(text);
+            int ok = fwrite(text, 1, n, f) == n;
+            ok = fclose(f) == 0 && ok;
+            if (ok) {
+                remove(PREFS_FILE);
+                rename(PREFS_FILE ".tmp", PREFS_FILE);
+            }
+        }
+        free(text);
+    }
+    return NULL;
+}
+
 static void prefs_save(void) {
-    FILE *f = fopen(PREFS_FILE ".tmp", "w");
-    if (!f) return;
+    size_t cap = 256;
+    for (int i = 0; i < n_prefs; i++)
+        if (prefs[i].value) cap += strlen(prefs[i].key) + strlen(prefs[i].value) + 8;
+    char *text = malloc(cap);
+    if (!text) return;
+    size_t len = 0;
     for (int i = 0; i < n_prefs; i++)
         if (prefs[i].value)
-            fprintf(f, "%c %s\t%s\n", prefs[i].type, prefs[i].key, prefs[i].value);
-    fclose(f);
-    remove(PREFS_FILE);
-    rename(PREFS_FILE ".tmp", PREFS_FILE);
+            len += snprintf(text + len, cap - len, "%c %s\t%s\n", prefs[i].type, prefs[i].key, prefs[i].value);
+    text[len] = 0;
+    pthread_mutex_lock(&save_lock);
+    if (!save_thread_up) {
+        pthread_t th;
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setstacksize(&a, 64 * 1024);
+        save_thread_up = pthread_create(&th, &a, prefs_writer, NULL) == 0;
+        pthread_attr_destroy(&a);
+    }
+    if (save_thread_up) {
+        free(save_text); // an older one not written yet
+        save_text = text;
+        text = NULL;
+        pthread_cond_signal(&save_cond);
+    }
+    pthread_mutex_unlock(&save_lock);
+    if (text) { // no thread: write it here
+        FILE *f = fopen(PREFS_FILE ".tmp", "w");
+        if (f) {
+            fwrite(text, 1, len, f);
+            fclose(f);
+            remove(PREFS_FILE);
+            rename(PREFS_FILE ".tmp", PREFS_FILE);
+        }
+        free(text);
+    }
 }
 
 static pref *pref_find(const char *key) {

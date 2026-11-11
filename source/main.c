@@ -168,8 +168,22 @@ int main() {
         int r = na_unity_frame();
         if (frame < 5 || frame % 600 == 0)
         {
-            l_info("Frame %d (nativeRender %d, swaps %d)", frame, r, na_egl_swap_count);
+            // speed of the last 600 frames, and what the port itself took of them
+            static uint64_t t600 = 0;
+            extern volatile uint32_t na_hud_us;
+            uint32_t na_io_cache_kb(uint32_t *hits_kb);
+            uint64_t t = sceKernelGetProcessTimeWide();
+            uint32_t hits = 0, kept = na_io_cache_kb(&hits);
+            l_info("Frame %d (nativeRender %d, swaps %d): %.1f fps, controls check %u us/frame, asset cache %u KB (%u KB read from it)",
+                   frame, r, na_egl_swap_count, t600 && frame >= 600 ? 600.0e6 / (double)(t - t600) : 0.0,
+                   (unsigned)(na_hud_us / 600), (unsigned)kept, (unsigned)hits);
+            t600 = t;
+            na_hud_us = 0;
             na_gl_log_memory();
+        }
+        if (frame % 120 == 60) {
+            void na_io_cache_trim(void);
+            na_io_cache_trim();
         }
         // Unity skips the swap while it has nothing to show: keep the display alive
         if (na_egl_swap_count == swaps_before)

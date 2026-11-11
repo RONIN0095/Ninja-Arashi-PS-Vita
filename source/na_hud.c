@@ -22,6 +22,8 @@
 #include "na_modules.h"
 #include "utils/logger.h"
 
+#include <psp2/kernel/processmgr.h>
+
 typedef void *(*domain_get_t)(void);
 typedef void *(*assembly_open_t)(void *domain, const char *name);
 typedef void *(*assembly_image_t)(void *assembly);
@@ -100,11 +102,38 @@ static void *call(void *method, void *obj, void **params) {
     return exc ? NULL : r;
 }
 
+/*
+ * GameObject.Find walks the scene by name and each call makes a new string:
+ * twelve of them every frame were a good part of a frame's time in a level.
+ * An object that was found is kept (with a GC handle, so its managed object
+ * stays) and switched off again each frame, which costs next to nothing;
+ * when its scene goes, its native pointer (m_CachedPtr, the first field) is
+ * cleared and it is dropped. Find only runs to look for objects not held:
+ * every frame for two seconds after a slow frame (a scene was loaded) or a
+ * change between menu and level, so the controls are gone before they show,
+ * and every 20th frame otherwise.
+ */
+#define N_PARTS (sizeof(parts) / sizeof(parts[0]))
+static void *held[N_PARTS];
+static uint32_t held_handle[N_PARTS];
+static uint32_t (*gchandle_new)(void *obj, int pinned);
+static void (*gchandle_free)(uint32_t handle);
+
+static int alive(void *obj) {
+    return obj && *(void **)((char *)obj + 8) != NULL; // UnityEngine.Object.m_CachedPtr
+}
+
+volatile uint32_t na_hud_us = 0; // time spent here, for the frame log (main.c)
+
 void na_hud_tick(int frame) {
-    if (state < 0 || frame < 30) return; // every frame: gone before they show
+    if (state < 0 || frame < 30) return;
+    uint64_t t_start = sceKernelGetProcessTimeWide();
     if (state == 0) {
         state = setup();
         if (state < 0) return;
+        gchandle_new = sym("il2cpp_gchandle_new");
+        gchandle_free = sym("il2cpp_gchandle_free");
+        l_info("[HUD] gchandle_new %p, gchandle_free %p", gchandle_new, gchandle_free);
     }
     if (frame % 300 == 30) { // shadows off (again after scene loads)
         int none = 0;
@@ -119,25 +148,55 @@ void na_hud_tick(int frame) {
             call(m_set_shadow_distance, NULL, a);
         }
     }
-    {
+    static uint64_t last_tick = 0;
+    static int fast_until = 150;
+    if (last_tick && t_start - last_tick > 150000) fast_until = frame + 120;
+    last_tick = t_start;
+    int scan = frame < fast_until || frame % 20 == 0 || !gchandle_new || !gchandle_free;
+
+    // objects held: off again, or let go when their scene is gone
+    int hidden = 0;
+    for (unsigned i = 0; i < N_PARTS; i++) {
+        if (!held[i]) continue;
+        if (!alive(held[i])) {
+            gchandle_free(held_handle[i]);
+            held[i] = NULL;
+            continue;
+        }
+        uint8_t off = 0;
+        void *args[1] = { &off };
+        call(m_set_active, held[i], args);
+    }
+    if (scan) {
         void *a[1] = { string_new("Canvas/PlayButton") };
-        in_level = call(m_find, NULL, a) != NULL;
-        a[0] = string_new("Canvas/GDPR/GDPR Popup");
-        gdpr_up = call(m_find, NULL, a) != NULL;
+        int now_in_level = call(m_find, NULL, a) != NULL;
+        if (now_in_level != in_level) fast_until = frame + 120;
+        in_level = now_in_level;
+        if (frame < 3000) { // the privacy pop-up only comes at the start
+            a[0] = string_new("Canvas/GDPR/GDPR Popup");
+            gdpr_up = call(m_find, NULL, a) != NULL;
+        } else {
+            gdpr_up = 0;
+        }
+        for (unsigned i = 0; i < N_PARTS; i++) {
+            if (held[i]) continue;
+            void *args[1] = { string_new(parts[i]) };
+            void *obj = call(m_find, NULL, args);
+            if (!obj) continue;
+            uint8_t off = 0;
+            args[0] = &off;
+            call(m_set_active, obj, args);
+            hidden++;
+            if (gchandle_new && gchandle_free) {
+                held[i] = obj;
+                held_handle[i] = gchandle_new(obj, 0);
+            }
+        }
     }
     static int logged = 0;
-    int hidden = 0;
-    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
-        void *args[1] = { string_new(parts[i]) };
-        void *obj = call(m_find, NULL, args);
-        if (!obj) continue;
-        uint8_t off = 0;
-        args[0] = &off;
-        call(m_set_active, obj, args);
-        hidden++;
-    }
     if (hidden && logged < 8) {
         logged++;
         l_info("[HUD] %d objects hidden", hidden);
     }
+    na_hud_us += (uint32_t)(sceKernelGetProcessTimeWide() - t_start);
 }
