@@ -207,9 +207,9 @@ int main() {
                    na_stats.link_n, na_stats.link_us / 1000, na_stats.read_kb, na_stats.read_us / 1000,
                    na_stats.swap_us / 1000, na_stats.finish_us / 1000);
         }
+        last_frame_us = now_us;
 #endif
         memset((void *)&na_stats, 0, sizeof(na_stats));
-        last_frame_us = now_us;
     }
 
     sceKernelExitDeleteThread(0);
