@@ -17,7 +17,7 @@
 #include "na_apk.h"
 #include "na_dxtpatch.h"
 
-void na_io_cache_drop(void); // na_dynlib.c
+void na_filecache_drop(void); // na_filecache.c
 
 #include <stdint.h>
 #include <stdio.h>
@@ -317,7 +317,7 @@ static int extract(apk_entry *e, const char *out_path) {
     }
     remove(out_path);
     rename(tmp_path, out_path);
-    na_io_cache_drop(); // copies of asset files kept in memory (na_dynlib.c)
+    na_filecache_drop(); // copies of asset files kept in memory
     // A fresh copy is known good: no CRC check of it on later starts (it may
     // be changed: see na_dxtpatch.c, which patches the new copy next start)
     if (strncmp(e->name, "assets/", 7) == 0) {

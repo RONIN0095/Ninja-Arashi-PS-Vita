@@ -48,17 +48,32 @@ static int io_logged = 0;
 static char *fd_names[MAX_TRACK_FD];
 volatile int na_io_trace_left = 0; // 4000 to trace asset I/O again
 
+// the whole path, and a number that changes each time the fd is opened or
+// closed (na_filecache.c keeps what it found out about an open file by it)
+static char *fd_paths[MAX_TRACK_FD];
+static uint32_t fd_gens[MAX_TRACK_FD];
+
 const char *na_io_fd_name(int fd) {
     return (fd >= 0 && fd < MAX_TRACK_FD) ? fd_names[fd] : NULL;
+}
+
+const char *na_io_fd_path(int fd, uint32_t *gen) {
+    if (fd < 0 || fd >= MAX_TRACK_FD) return NULL;
+    if (gen) *gen = fd_gens[fd];
+    return fd_paths[fd];
 }
 
 static void track_fd(int fd, const char *path) {
     if (fd < 0 || fd >= MAX_TRACK_FD) return;
     free(fd_names[fd]);
+    free(fd_paths[fd]);
     fd_names[fd] = NULL;
+    fd_paths[fd] = NULL;
+    fd_gens[fd]++;
     if (path && (strstr(path, "/Data/") || strstr(path, "base.apk"))) {
         const char *b = strrchr(path, '/');
         fd_names[fd] = strdup(b ? b + 1 : path);
+        fd_paths[fd] = strdup(path);
     }
 }
 

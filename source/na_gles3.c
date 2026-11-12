@@ -1701,10 +1701,16 @@ static void ring_record(int count, uint32_t last);
 static int check_draw(GLsizei count, GLenum type, const void *indices, GLint base, GLint first, int elements,
                       char *desc, size_t desc_size) {
     if (count <= 0) return 0;
+    if (desc_size) desc[0] = 0;
     if (!program_ok()) return 0;
     // no shadows: a 2D game on a small screen, and the pass cost GPU time
     if (cur_program < MAX_PROGS && prog_shadow[cur_program]) return 0;
     check_empty_textures();
+    // Every index and position of the draw is only gone through in a traced
+    // frame (L+R+DOWN). It used to be done for every draw, to keep bad draws
+    // from the GPU while the glitches were looked for; their cause is fixed
+    // (vitaGL's 16-bit attribute offsets), and the passes cost time each frame.
+    int full = TRACING_FRAME();
     uint32_t last;
     if (elements) {
         int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
@@ -1727,14 +1733,14 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
                 return 0;
             }
         }
-        last = max_index(src, count, type) + base;
+        last = full ? max_index(src, count, type) + base : 0;
         first_vertex = (type == GL_UNSIGNED_SHORT ? ((const uint16_t *)src)[0] :
                         type == GL_UNSIGNED_INT ? ((const uint32_t *)src)[0] : ((const uint8_t *)src)[0]) + base;
     } else {
         last = first + count - 1;
         first_vertex = first;
     }
-    snprintf(desc, desc_size, "count %d, last vertex %u", count, last);
+    if (full) snprintf(desc, desc_size, "count %d, last vertex %u", count, last);
     last_vertex = last;
 
     uint32_t state = cur_vao->vertex_attrib_state;
@@ -1769,7 +1775,7 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
     // draws with impossible values.
     pos_lo[0] = pos_lo[1] = pos_lo[2] = 0;
     pos_hi[0] = pos_hi[1] = pos_hi[2] = 0;
-    if ((state & 1) && last < 1024 && cur_vao->vertex_attrib_vbo[0] &&
+    if (full && (state & 1) && last < 1024 && cur_vao->vertex_attrib_vbo[0] &&
         cur_vao->vertex_attrib_config[0].format == 9 /* F32 */ && cur_vao->vertex_attrib_config[0].componentCount >= 2) {
         vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
         uint32_t off = cur_vao->vertex_attrib_offsets[0], stride = cur_vao->vertex_stream_config[0].stride;
@@ -1929,8 +1935,10 @@ static void *near_idx;      // the filtered index list
 static size_t near_idx_size;
 static int near_logs = 0;
 
+static const int near_cut = 0; // off: the streaks it was made for had another cause, and it costs a pass per draw
+
 static const void *cut_near_triangles(GLenum mode, GLsizei *count, GLenum type, const void *indices, GLint base) {
-    if (mode != GL_TRIANGLES || cur_program >= MAX_PROGS) return NULL;
+    if (!near_cut || mode != GL_TRIANGLES || cur_program >= MAX_PROGS) return NULL;
     if (!prog_vp_loc[cur_program] || !prog_o2w_loc[cur_program]) return NULL;
     const float *vp = prog_vp[cur_program], *m = prog_o2w[cur_program];
     // orthographic: w is 1 everywhere, nothing can be in front of the camera

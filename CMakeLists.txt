@@ -109,6 +109,7 @@ set(SOURCES
     source/na_threads.c
     source/na_hud.c
     source/na_dxtpatch.c
+    source/na_filecache.c
     source/na_modules.c
     source/na_shaders.c
     source/na_sles.c
