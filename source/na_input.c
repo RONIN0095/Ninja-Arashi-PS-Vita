@@ -134,7 +134,9 @@ static uint32_t vpad_buttons(void) {
     static int trace_combo = 0;
     int combo = (b & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_DOWN)) ==
                 (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_DOWN);
+#ifndef NA_RELEASE
     if (combo && !trace_combo) na_trace_request = 1;
+#endif
     trace_combo = combo;
     if (pad.lx < 64) b |= VPAD_LEFT;
     if (pad.lx > 192) b |= VPAD_RIGHT;

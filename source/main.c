@@ -154,8 +154,12 @@ int main() {
 
     na_dxt_patch(); // once: the ETC2 textures in the asset files become DXT5
 
+#ifndef NA_RELEASE
     SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100 + 10, 0x4000, 0, 0, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
+#else
+    (void)watchdog_thread;
+#endif
 
     na_thread_register("main", (void *)main);
     na_unity_start();
@@ -167,6 +171,7 @@ int main() {
         na_java_tick();
         int swaps_before = na_egl_swap_count;
         int r = na_unity_frame();
+#ifndef NA_RELEASE
         if (frame < 5 || frame % 600 == 0)
         {
             // speed of the last 600 frames, and what the port itself took of them
@@ -181,6 +186,7 @@ int main() {
             na_hud_us = 0;
             na_gl_log_memory();
         }
+#endif
         na_filecache_tick(frame);
         // Unity skips the swap while it has nothing to show: keep the display alive
         if (na_egl_swap_count == swaps_before)
@@ -189,6 +195,7 @@ int main() {
             sceIoRemove(DATA_PATH "sound_probe.txt"); // sound setup went fine (see dynlib.c)
         na_hud_tick(frame);
         frame++;
+#ifndef NA_RELEASE
         uint64_t now_us = sceKernelGetProcessTimeWide();
         // Hitches: frames over 50 ms, with what they spent their time on
         static int hitches = 0;
@@ -200,6 +207,7 @@ int main() {
                    na_stats.link_n, na_stats.link_us / 1000, na_stats.read_kb, na_stats.read_us / 1000,
                    na_stats.swap_us / 1000, na_stats.finish_us / 1000);
         }
+#endif
         memset((void *)&na_stats, 0, sizeof(na_stats));
         last_frame_us = now_us;
     }

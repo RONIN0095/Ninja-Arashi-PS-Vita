@@ -26,6 +26,14 @@ set(DATA_PATH "ux0:data/ninjaarashi/") # Path to data (with trailing /)
 set(PACKAGE_NAME "com.blackpanther.ninjaarashi")
 add_definitions(-DDATA_PATH="${DATA_PATH}" -DGAME_PATH="${DATA_PATH}" -DPACKAGE_NAME="${PACKAGE_NAME}")
 
+# Release: the diagnostics of the port's development are left out (log only
+# for warnings and errors, no frame and hitch log, no draw ring, no
+# L+R+DOWN trace, no watchdog). -DNA_RELEASE=OFF builds them in again.
+option(NA_RELEASE "Leave out the development diagnostics" ON)
+if (NA_RELEASE)
+  add_definitions(-DNA_RELEASE)
+endif()
+
 # Port type
 option(NDK_PORT "This should be on if the game is done with Android NDK (has an android_main entry point)" OFF)
 if (NDK_PORT)

@@ -59,6 +59,9 @@ static void note_filled(GLenum target) {
 }
 // Draws with a texture that never got pixels show black or nothing: log them
 static void check_empty_textures(void) {
+#ifdef NA_RELEASE
+    return;
+#endif
     static int logged = 0;
     if (logged >= 48) return;
     for (int u = 0; u < 4; u++) {
@@ -290,7 +293,11 @@ static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const 
     int frag = shader < MAX_SHADER_IDS ? shader_is_fragment[shader] : 0;
     int changed = 0;
     char *t = na_shaders_translate(src, frag, &changed);
+#ifdef NA_RELEASE
+    if (0) {
+#else
     if (shaders_seen < 4) {
+#endif
         l_info("glShaderSource(%u, %s): %u bytes%s", shader, frag ? "fragment" : "vertex",
                (unsigned)pos, t ? ", translated from GLSL ES 3.00" : "");
         // The source Unity gave and what vitaGL gets, for checking the translation
@@ -2435,6 +2442,9 @@ static void check_outlier(ring_draw *r);
 static int ring_pos = 0, ring_n = 0;
 
 static void ring_record(int count, uint32_t last) {
+#ifdef NA_RELEASE
+    return;
+#endif
     if (!ring) {
         ring = calloc(RING_DRAWS, sizeof(ring_draw));
         if (!ring) return;

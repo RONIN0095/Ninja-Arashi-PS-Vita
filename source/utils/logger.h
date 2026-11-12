@@ -31,11 +31,18 @@ extern "C" {
 #define l_debug(...)
 #endif
 
-// Always on: these also go to the log file, see logger.c
+// These also go to the log file, see logger.c. A release build only keeps
+// warnings and errors.
+#ifdef NA_RELEASE
+#define l_info(...)    ((void)0)
+#define l_success(...) ((void)0)
+#define l_wait(...)    ((void)0)
+#else
 #define l_info(...)    _log_print(LT_INFO,    __VA_ARGS__)
-#define l_warn(...)    _log_print(LT_WARN,    __VA_ARGS__)
 #define l_success(...) _log_print(LT_SUCCESS, __VA_ARGS__)
 #define l_wait(...)    _log_print(LT_WAIT,    __VA_ARGS__)
+#endif
+#define l_warn(...)    _log_print(LT_WARN,    __VA_ARGS__)
 
 #define l_error(...)   _log_print(LT_ERROR,   __VA_ARGS__)
 #define l_fatal(...)   _log_print(LT_FATAL,   __VA_ARGS__)
